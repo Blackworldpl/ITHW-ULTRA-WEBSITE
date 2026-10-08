@@ -1,0 +1,42 @@
+{
+  "name": "it-hardware",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "node node_modules/next/dist/bin/next dev --hostname 127.0.0.1",
+    "build": "node node_modules/next/dist/bin/next build",
+    "start": "node node_modules/next/dist/bin/next start --hostname 0.0.0.0",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
+    "db:migrate": "node --import tsx scripts/migrate.ts",
+    "db:local": "node --import tsx scripts/local-postgres.ts",
+    "db:test:prepare": "node --import tsx scripts/prepare-test-db.ts",
+    "admin:create": "node --import tsx scripts/create-admin.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:integration": "node --import tsx scripts/run-integration.ts"
+  },
+  "dependencies": {
+    "html5-qrcode": "2.3.8",
+    "lucide-react": "1.52.0",
+    "next": "16.3.8",
+    "pg": "8.23.1",
+    "qrcode": "1.5.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "read-excel-file": "9.3.10",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "@types/pg": "8.23.1",
+    "@types/qrcode": "1.5.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "embedded-postgres": "18.4.0-beta.17",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  },
+  "allowScripts": {
+    "@embedded-postgres/windows-x64@18.4.0-beta.17": true,
+    "esbuild@0.28.2": true
+  }
+}

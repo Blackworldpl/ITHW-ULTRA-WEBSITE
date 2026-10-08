@@ -1,0 +1,37 @@
+{
+  "fixtureCount": 12000,
+  "environment": "local PostgreSQL 18, isolated synthetic _test",
+  "scope": "server queries only; excludes authentication, network and browser rendering",
+  "measurements": {
+    "scopedTableAndSummary50": {
+      "p50Ms": 9,
+      "p95Ms": 11,
+      "samples": 12
+    },
+    "multiwordSearch": {
+      "p50Ms": 222,
+      "p95Ms": 429,
+      "samples": 12
+    },
+    "stockSort100": {
+      "p50Ms": 8,
+      "p95Ms": 10,
+      "samples": 12
+    },
+    "shortageSort": {
+      "p50Ms": 6,
+      "p95Ms": 7,
+      "samples": 12
+    },
+    "deepPage": {
+      "p50Ms": 12,
+      "p95Ms": 14,
+      "samples": 12
+    },
+    "categorySuggestions": {
+      "p50Ms": 27,
+      "p95Ms": 31,
+      "samples": 12
+    }
+  }
+}

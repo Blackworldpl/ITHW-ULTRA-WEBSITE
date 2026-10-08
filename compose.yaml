@@ -1,0 +1,56 @@
+name: it-hardware
+services:
+  postgres:
+    image: postgres:18.6-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Ustaw własnego użytkownika administracyjnego PostgreSQL}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Ustaw własne silne hasło PostgreSQL}
+      POSTGRES_DB: ${POSTGRES_DB:?Ustaw nazwę bazy PostgreSQL}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --data-checksums
+    volumes:
+      # PostgreSQL 18 stores PGDATA under /var/lib/postgresql/18/docker.
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [database]
+
+  migrate:
+    build:
+      context: .
+      target: tools
+    environment:
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Ustaw URL konta migracji z hostem postgres}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [database]
+    restart: 'no'
+
+  app:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Ustaw URL konta aplikacji z hostem postgres}
+      APP_URL: ${APP_URL:?Ustaw kanoniczny adres HTTPS aplikacji}
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
+      SERVICENOW_URL: ${SERVICENOW_URL:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      # Publish through an HTTPS reverse proxy on this host.
+      - '127.0.0.1:3000:3000'
+    networks: [database, web]
+
+volumes:
+  postgres_data:
+networks:
+  database:
+    internal: true
+  web:

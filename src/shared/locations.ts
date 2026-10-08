@@ -1,0 +1,5 @@
+import type {Location} from './types';
+export const locationKinds=['FOLDER','SITE','BUILDING','ZONE','ROOM','RACK','SHELF','BIN','DESK'] as const;
+export const locationLabels:Record<string,string>={FOLDER:'Folder',SITE:'Obiekt',BUILDING:'Budynek',ZONE:'Strefa',ROOM:'Pomieszczenie',RACK:'Regał',SHELF:'Półka',BIN:'Pojemnik',DESK:'Stanowisko / stół'};
+export function locationSubtree(locations:Location[],id:string):Set<string>{const children=new Map<string,string[]>();for(const location of locations){if(!location.parentId)continue;const siblings=children.get(location.parentId);if(siblings)siblings.push(location.id);else children.set(location.parentId,[location.id]);}const found=new Set([id]),queue=[id];for(let index=0;index<queue.length;index++){for(const child of children.get(queue[index])??[]){if(found.has(child))continue;found.add(child);queue.push(child);}}return found;}
+export function canNestLocation(locations:Location[],child:Location,parent:Location){return !locationSubtree(locations,child.id).has(parent.id);}

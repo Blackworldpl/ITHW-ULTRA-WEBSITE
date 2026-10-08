@@ -1,0 +1,31 @@
+{
+  "fixtureCount": 10000,
+  "environment": "local PostgreSQL 18, synthetic _test only",
+  "measurements": {
+    "searchExactAssetId": {
+      "p50Ms": 72,
+      "p95Ms": 78,
+      "samples": 12
+    },
+    "searchPartialSerial": {
+      "p50Ms": 120,
+      "p95Ms": 126,
+      "samples": 12
+    },
+    "searchCommonModel": {
+      "p50Ms": 109,
+      "p95Ms": 120,
+      "samples": 12
+    },
+    "searchTypoName": {
+      "p50Ms": 134,
+      "p95Ms": 149,
+      "samples": 12
+    },
+    "paginatedAssetTable": {
+      "p50Ms": 24,
+      "p95Ms": 29,
+      "samples": 12
+    }
+  }
+}

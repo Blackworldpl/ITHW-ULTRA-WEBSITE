@@ -1,0 +1,57 @@
+'use client';
+import Link from 'next/link';
+import type {Permission} from '@/shared/permissions';
+import {hasPermission} from '@/shared/permissions';
+import {AppProvider,useApp} from './context';
+import {Shell} from './shell';
+import {DevicesScreen} from './devices';
+import {DeviceScreen} from './device-screen';
+import {DashboardScreen} from './dashboard';
+import {AssetListScreen,AssetDetailScreen} from './assets';
+import {InventoryListScreen,InventoryDetailScreen} from './inventory';
+import {DeliveryScreen,InvoiceScreen} from './operations';
+import {AdminScreen} from './admin';
+import {ScanScreen} from './scanner';
+import {InventoryImportScreen} from './inventory-import';
+import {ReportsScreen} from './reports';
+import {EmployeesScreen} from './employees';
+import {WorkstationsScreen} from './workstations';
+import {ConfigurationsScreen,DocumentsScreen} from './library';
+import {StocktakesScreen} from './stocktakes';
+import {IncidentsScreen,ServiceNowScreen} from './incidents';
+import {LocationsScreen} from './locations-screen';
+import {PermissionsScreen,SettingsScreen} from './access-settings';
+import {EmptyState,ErrorMessage} from './ui';
+const screenPermissions:Record<string,Permission>={devices:'device.view',assets:'asset.view',asset:'asset.view',inventory:'inventory.view',deliveries:'invoice.view',invoices:'invoice.view',invoice:'invoice.view',scan:'rfid.scan',employees:'employee.view',workstations:'location.view','my-equipment':'employee.view',locations:'location.manage',configs:'config.view',documents:'document.view',stocktakes:'inventory.run',incidents:'incident.view',servicenow:'incident.view',users:'user.view',permissions:'role.manage',audit:'audit.view',settings:'settings.manage',admin:'settings.manage',reports:'asset.view',import:'import.run'};
+function AccessGate({section,children}:{section?:string;children:React.ReactNode}){const {user}=useApp();return section&&screenPermissions[section]&&!hasPermission(user,screenPermissions[section])?<ErrorMessage message="Twoje konto nie ma uprawnienia do tej części systemu."/>:children;}
+export function AppClient({segments=[]}:{segments?:string[]}){
+ const [section,id]=segments;if(section==='device'&&id&&segments.length===2)return <DeviceScreen id={id}/>;let screen:React.ReactNode;
+ if(!section)screen=<DashboardScreen/>;
+ else if(segments.length>2)screen=<Missing/>;
+ else if(section==='devices'&&!id)screen=<DevicesScreen/>;
+ else if(section==='assets'&&!id)screen=<AssetListScreen/>;
+ else if(section==='asset'&&id)screen=<AssetDetailScreen key={id} assetId={id}/>;
+ else if(section==='inventory')screen=id?<InventoryDetailScreen key={id} slug={id}/>:<InventoryListScreen/>;
+ else if(section==='deliveries'&&!id)screen=<DeliveryScreen/>;
+ else if(section==='invoices'||section==='invoice'&&id)screen=<InvoiceScreen key={id??'list'} id={id}/>;
+ else if(section==='scan'&&!id)screen=<ScanScreen/>;
+ else if(section==='employees')screen=<EmployeesScreen key={id??'list'} id={id}/>;
+ else if(section==='my-equipment'&&!id)screen=<EmployeesScreen mine/>;
+ else if(section==='workstations')screen=<WorkstationsScreen key={id??'list'} id={id}/>;
+ else if(section==='locations'&&!id)screen=<LocationsScreen/>;
+ else if(section==='configs')screen=<ConfigurationsScreen key={id??'list'} id={id}/>;
+ else if(section==='documents'&&!id)screen=<DocumentsScreen/>;
+ else if(section==='stocktakes')screen=<StocktakesScreen key={id??'list'} id={id}/>;
+ else if(section==='incidents')screen=<IncidentsScreen key={id??'list'} id={id}/>;
+ else if(section==='servicenow'&&!id)screen=<ServiceNowScreen/>;
+ else if(section==='users'&&!id)screen=<AdminScreen key="users" initialTab="users"/>;
+ else if(section==='audit'&&!id)screen=<AdminScreen key="audit" initialTab="audit"/>;
+ else if(section==='permissions'&&!id)screen=<PermissionsScreen/>;
+ else if(section==='settings'&&!id)screen=<SettingsScreen/>;
+ else if(section==='admin'&&!id)screen=<AdminScreen/>;
+ else if(section==='reports'&&!id)screen=<ReportsScreen/>;
+ else if(section==='import'&&!id)screen=<InventoryImportScreen/>;
+ else screen=<Missing/>;
+ return <AppProvider><Shell><AccessGate section={section}>{screen}</AccessGate></Shell></AppProvider>;
+}
+function Missing(){return <section className="panel"><EmptyState title="Nie znaleziono strony" description="Sprawdź adres lub otwórz przegląd operacyjny." action={<Link href="/" className="button">Przegląd operacyjny</Link>}/></section>;}

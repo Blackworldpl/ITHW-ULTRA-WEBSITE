@@ -1,0 +1,20 @@
+'use client';
+import {useEffect,useRef,useState,type FormEvent} from 'react';
+import type {DevicePairing,TvPairingCode,TvPairingState} from '@/shared/devices';
+import {useApp} from './context';
+import {api,Button,ErrorMessage,Field,Loading,formatDate} from './ui';
+
+export function TvPairingScreen({id,onApproved}:{id:string;onApproved:()=>void}){
+ const [pairing,setPairing]=useState<TvPairingCode|null>(null),[error,setError]=useState(''),[expired,setExpired]=useState(false),[busy,setBusy]=useState(false);
+ const initial=useRef<Promise<TvPairingCode>|null>(null),callback=useRef(onApproved);callback.current=onApproved;
+ useEffect(()=>{let active=true;initial.current??=api<TvPairingCode>('/api/device/'+id+'/pairing',{method:'POST',body:'{}'});initial.current.then(value=>{if(active)setPairing(value);}).catch(e=>{if(active)setError((e as Error).message);});return()=>{active=false;};},[id]);
+ useEffect(()=>{if(!pairing||expired)return;let active=true,timer:ReturnType<typeof setTimeout>;async function poll(){try{const result=await api<TvPairingState>('/api/device/'+id+'/pairing');if(!active)return;if(result.status==='approved'){callback.current();return;}if(result.status==='expired'||result.status==='replaced'){setExpired(true);return;}setError('');}catch(e){if(active)setError((e as Error).message);}if(active)timer=setTimeout(poll,5000);}void poll();return()=>{active=false;clearTimeout(timer);};},[id,pairing,expired]);
+ async function regenerate(){if(busy)return;setBusy(true);setError('');try{setPairing(await api<TvPairingCode>('/api/device/'+id+'/pairing',{method:'POST',body:'{}'}));setExpired(false);}catch(e){setError((e as Error).message);}finally{setBusy(false);}}
+ return <><div className="eyebrow">POŁĄCZ TEN TELEWIZOR</div><h1>Potwierdź kod w panelu</h1><p>W panelu administratora otwórz ten TV w „Ekrany i terminale”, wybierz „Połącz TV” i wpisz poniższy kod.</p><ErrorMessage message={error}/>{pairing?<><div className={'device-pair-code tv-generated-code '+(expired?'is-expired':'')} aria-label="Kod wyświetlany na TV">{pairing.code}</div><p role="status">{expired?'Kod wygasł lub został zastąpiony.': 'Oczekiwanie na zatwierdzenie administratora…'}</p><small>Ważny do {formatDate(pairing.expiresAt,true)}. Kod zatwierdza dostęp tylko tej przeglądarki.</small><Button variant="secondary" disabled={busy} onClick={()=>void regenerate()}>{busy?'Generowanie…':'Wygeneruj nowy kod'}</Button></>:error?<Button variant="secondary" disabled={busy} onClick={()=>void regenerate()}>Spróbuj ponownie</Button>:<Loading/>}</>;
+}
+
+export function TvPairingConfirmation({pairing,onApproved}:{pairing:DevicePairing;onApproved:()=>void}){
+ const {user}=useApp(),[code,setCode]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
+ async function submit(event:FormEvent){event.preventDefault();if(busy)return;setBusy(true);setError('');try{await api('/api/devices/'+pairing.device.id+'/approve',{method:'POST',body:JSON.stringify({code,version:pairing.device.version})},user.csrfToken);onApproved();}catch(e){setError((e as Error).message);}finally{setBusy(false);}}
+ return <form onSubmit={submit}><p>Otwórz link na telewizorze. Kod pojawi się na TV — wpisz go tutaj, aby zatwierdzić tę przeglądarkę.</p><Field label="Link TV"><input readOnly value={pairing.url} onFocus={e=>e.target.select()}/></Field>{/^localhost$|^127\./.test(new URL(pairing.url).hostname)&&<div className="notice notice-info">Na fizycznym TV użyj firmowego adresu aplikacji. Localhost działa tylko na tym komputerze.</div>}<ErrorMessage message={error}/><Field label="Kod widoczny na TV"><input className="tv-confirm-code" required inputMode="numeric" autoComplete="off" pattern="[0-9]{6}" maxLength={6} autoFocus disabled={busy} placeholder="000000" value={code} onChange={e=>setCode(e.target.value.replace(/[^0-9]/g,''))}/></Field><p className="help-note">Zatwierdzenie zastąpi poprzednio sparowaną przeglądarkę tego TV.</p><div className="form-actions"><Button disabled={busy||code.length!==6}>{busy?'Zatwierdzanie…':'Zatwierdź TV'}</Button></div></form>;
+}

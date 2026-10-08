@@ -1,0 +1,29 @@
+/* Shared tokens apply to the app and independently configured device screens. */
+[data-theme="light"] {
+ color-scheme:light;--bg:#f4f6f8;--panel:#fff;--surface-raised:#eef2f6;--surface-hover:#e6ecf2;--surface-input:#fff;
+ --navy:#fff;--navy-deep:#f4f6f8;--ink:#18212d;--muted:#4c5c6d;--subtle:#59697a;
+ --border:rgba(24,33,45,.12);--border-strong:rgba(24,33,45,.23);
+ --accent:#145bc2;--accent-solid:#2169dd;--action-primary:#2169dd;--accent-hover:#1859c0;--accent-soft:rgba(33,105,221,.07);
+ --success:#226943;--success-soft:rgba(34,105,67,.08);--amber:#875507;--warning-soft:rgba(135,85,7,.08);
+ --red:#aa2937;--error-soft:rgba(170,41,55,.07);--shadow:0 8px 24px rgba(24,33,45,.08);--shadow-modal:0 24px 90px rgba(24,33,45,.2);
+}
+[data-theme="light"] .nav-link.active {background:#e9eff8}
+[data-theme="light"] .context-menu,[data-theme="light"] .location-drag-preview {background:var(--panel)}
+[data-theme="light"] .scan-entry {background:var(--panel);border-color:var(--border-strong)}
+[data-theme="light"] .config-code,[data-theme="light"] .data-table td {color:var(--ink)}
+[data-theme="light"] .field>span {color:var(--muted)}
+[data-theme="light"] .brand-place {color:var(--muted)}
+[data-theme="light"] .priority-critical {color:#aa2937;background:#fae6e9}
+[data-theme="light"] .priority-high {background:#faf0d9}
+[data-theme="light"] .priority-normal {background:#e6effc}
+[data-theme="light"] .priority-low {background:#e5f2e9}
+[data-theme="light"] .status-assigned {color:#215d91}
+[data-theme="light"] .status-preparation {color:#4c5c6d}
+[data-theme="light"] .status-disposal {color:#73513b}
+[data-theme="light"] .toast {background:#eff8f1;border-color:#84b799;color:#226943}
+[data-theme="light"] .brand-intro {background:var(--bg)}
+[data-theme="light"] .modal-backdrop {background:rgba(24,33,45,.35)}
+[data-theme="light"] .skeleton::after {background:linear-gradient(90deg,transparent,rgba(24,33,45,.04),transparent)}
+.auth-theme-toggle {position:absolute;top:24px;right:30px}
+.theme-settings {margin-bottom:28px}
+@media(max-width:767px){.topbar{gap:9px}.auth-theme-toggle{top:16px;right:16px}}

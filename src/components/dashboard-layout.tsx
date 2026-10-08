@@ -1,0 +1,9 @@
+'use client';
+import {useState} from 'react';
+import {defaultDashboardLayout,dashboardSections,type DashboardLayout,type DashboardPreference} from '@/shared/dashboard-layout';
+import {useApp} from './context';
+import {api,Button,ErrorMessage,Modal} from './ui';
+export function DashboardLayoutEditor({preference,onClose,onSaved}:{preference:DashboardPreference;onClose:()=>void;onSaved:(preference:DashboardPreference)=>void}){
+ const {user}=useApp(),[layout,setLayout]=useState<DashboardLayout>(preference.layout),[busy,setBusy]=useState(false),[error,setError]=useState('');
+ return <Modal title="Mój dashboard" onClose={()=>{if(!busy)onClose();}}><p>Wybierz sekcje na swoim ekranie głównym. Ten układ jest zapisany dla Twojego konta administratora.</p><ErrorMessage message={error}/><form onSubmit={async e=>{e.preventDefault();if(busy)return;setBusy(true);setError('');try{onSaved(await api<DashboardPreference>('/api/dashboard/layout',{method:'PATCH',body:JSON.stringify({layout,version:preference.version})},user.csrfToken));}catch(e){setError((e as Error).message);}finally{setBusy(false);}}}><div className="dashboard-layout-options">{Object.entries(dashboardSections).map(([key,label])=><label className="checkbox-inline" key={key}><input type="checkbox" disabled={busy} checked={layout[key as keyof DashboardLayout]} onChange={e=>setLayout(value=>({...value,[key]:e.target.checked}))}/>{label}</label>)}</div><div className="form-actions"><Button type="button" variant="secondary" disabled={busy} onClick={()=>setLayout({...defaultDashboardLayout})}>Przywróć wszystkie</Button><Button type="button" variant="secondary" disabled={busy} onClick={onClose}>Anuluj</Button><Button disabled={busy||!Object.values(layout).some(Boolean)}>{busy?'Zapisywanie…':'Zapisz mój dashboard'}</Button></div></form></Modal>;
+}
