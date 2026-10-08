@@ -29,8 +29,11 @@ export async function listInventory(params:URLSearchParams):Promise<InventoryPag
  if(input.noLocation&&input.locationId)throw new AppError(400,'Wybierz lokalizację albo brak lokalizacji.');
  const filters:string[]=[],values:unknown[]=[];
  const add=(value:unknown,expression:(parameter:string)=>string)=>{values.push(value);filters.push(expression('$'+values.length));};
- const search=`(n.name||' '||coalesce(n.sku,'')||' '||coalesce(n.product_code,'')||' '||n.slug||' '||n.category||' '||coalesce(l.path,''))`;
- for(const term of new Set(normalized(input.q).split(/\s+/).filter(Boolean)))add('%'+escapeLike(term)+'%',p=>`${searchable(search)} ILIKE ${p}`);
+ // Each word must appear in the product text or in the location path. A word has
+ // no spaces, so it can only match inside one field: matching the stored, indexed
+ // search_text (migration 017) or the path separately gives the same rows as the
+ // former per-row translate() over the joined text.
+ for(const term of new Set(normalized(input.q).split(/\s+/).filter(Boolean)))add('%'+escapeLike(term)+'%',p=>`(n.search_text ILIKE ${p} OR n.location_id IN (SELECT id FROM locations WHERE ${searchable('path')} ILIKE ${p}))`);
  if(input.category)add(input.category,p=>`n.category=${p}`);
  if(input.noLocation)filters.push('n.location_id IS NULL');
  if(input.locationId)add(input.locationId,p=>input.includeChildren?`n.location_id IN (WITH RECURSIVE branch AS (SELECT id FROM locations WHERE id=${p} UNION ALL SELECT l.id FROM locations l JOIN branch b ON l.parent_id=b.id) SELECT id FROM branch)`:`n.location_id=${p}`);
@@ -43,7 +46,7 @@ export async function listInventory(params:URLSearchParams):Promise<InventoryPag
   query<{total:number}&InventorySummary>(`SELECT count(*) FILTER(WHERE ${stock})::integer AS total ${summary} ${inventoryFrom} WHERE ${base}`,values)
  ]);
  const {total,products,low,out,ok}=counts.rows[0];
- return JSON.parse(JSON.stringify({items:rows.rows,total,page:input.page,pageSize:input.pageSize,...(input.overview?{summary:{products,low,out,ok}}:{})}));
+ return {items:rows.rows,total,page:input.page,pageSize:input.pageSize,...(input.overview?{summary:{products,low,out,ok}}:{})};
 }
 export async function inventoryCategories(params:URLSearchParams):Promise<PageResult<InventoryCategory>>{
  const {q,page,pageSize}=parse(schema,{q:params.get('q')??'',page:params.get('page')??1,pageSize:params.get('pageSize')??30});

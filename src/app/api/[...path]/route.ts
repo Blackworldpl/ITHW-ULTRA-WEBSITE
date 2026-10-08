@@ -145,7 +145,7 @@ async function handle(request: NextRequest, context: Context) {
     if(key==='imports/preview' && method==='POST') { auth.requireRole(user,advanced); return success(await previewImport(await readJson(request,2*1024*1024),user)); }
     if(key==='imports/commit' && method==='POST') { auth.requireRole(user,advanced); return success(await commitImport(await readJson(request,2*1024*1024),user),201); }
     if(key==='dashboard' && method==='GET') return success(await service.getDashboard(user));
-    if(key==='search' && method==='GET') return success(await searchHardware(params.get('q') || '',user));
+    if(key==='search' && method==='GET') return success(await searchHardware(params.get('q') || '',user,request.signal));
     if(key==='scan/resolve' && method==='GET') {const resolved=await service.resolveScan(params.get('code')||'');access.requirePermission(user,resolved.href.startsWith('/asset/')?'asset.view':resolved.href.startsWith('/inventory/')?'inventory.view':'location.view');return success(resolved);}
     if(key==='reports' && method==='GET') return success(await getReports(user));
     if(key==='reports/shortages.csv' && method==='GET') { auth.requireRole(user,advanced); access.requirePermission(user,'inventory.view'); return new NextResponse(await exportShortages(user),{headers:{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="braki-magazynowe.csv"','Cache-Control':'no-store'}}); }

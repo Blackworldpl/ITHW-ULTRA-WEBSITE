@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -95,9 +95,19 @@ export function AssetListScreen() {
   Object.entries(filters).forEach(([key, value]) => {
     if (value) params.set(key, value);
   });
+  // "Next" continues from the last row of the current page (keyset) instead of an
+  // offset; cursors are remembered per query so "Previous" returns to the same rows.
+  const cursors = useRef(new Map<string, string>());
+  const listKey = JSON.stringify([debounced, filters]);
+  const after = page > 1 ? cursors.current.get(`${listKey}#${page}`) : undefined;
+  if (after) params.set("after", after);
   const { data, error, loading, reload } = useResource<PageResult<Asset>>(
     `/api/assets?${params}`,
   );
+  function changePage(next: number) {
+    if (next === page + 1 && data?.page === page && data.nextCursor) cursors.current.set(`${listKey}#${next}`, data.nextCursor);
+    setPage(next);
+  }
   function filter(key: string, value: string) {
     setFilters((previous) => ({ ...previous, [key]: value }));
     setPage(1);
@@ -333,7 +343,7 @@ export function AssetListScreen() {
               total={data.total}
               page={page}
               pageSize={data.pageSize}
-              onChange={setPage}
+              onChange={changePage}
             />
           </>
         ) : (

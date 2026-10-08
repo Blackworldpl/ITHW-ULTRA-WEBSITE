@@ -1,14 +1,24 @@
 import type {SearchResult,User} from '@/shared/types';
 import {hasPermission,type Permission} from '@/shared/permissions';
-import {query} from './db';
+import {searchQuery as query} from './db';
 import {AppError} from './errors';
 const like=(value:string)=>value.replace(/[\\%_]/g,c=>'\\'+c);
-export async function searchHardware(raw:string,user:User):Promise<SearchResult[]>{
+// At most this many search queries per request run at once (audit: up to 10 used
+// to start together); queued ones are skipped when the browser cancels the request.
+const perRequest=3;
+async function limited<T>(tasks:(()=>Promise<T>)[],signal?:AbortSignal):Promise<T[]>{
+ const results:T[]=new Array(tasks.length);let next=0;
+ async function worker(){while(next<tasks.length){const index=next++;if(signal?.aborted)throw new AppError(499,'Wyszukiwanie zostało przerwane.');results[index]=await tasks[index]();}}
+ await Promise.all(Array.from({length:Math.min(perRequest,tasks.length)},worker));
+ return results;
+}
+export async function searchHardware(raw:string,user:User,signal?:AbortSignal):Promise<SearchResult[]>{
  let term=raw.trim();if(term.length<2)return [];if(term.length>200)throw new AppError(400,'Wyszukiwanie może mieć najwyżej 200 znaków.');
  try{const url=new URL(term,process.env.APP_URL);if(url.origin===new URL(process.env.APP_URL!).origin&&/^\/(asset|workstations)\/[^/]+$/.test(url.pathname))term=decodeURIComponent(url.pathname.split('/').at(-1)!);}catch{}
  const values=[`%${like(term)}%`,term.toLowerCase(),`${like(term)}%`];
- const tasks:Promise<{type:SearchResult['type'];rows:{id:string;title:string;subtitle:string;score:number;href?:string}[]}>[]=[];
- const add=(permission:Permission,type:SearchResult['type'],sql:string)=>{if(hasPermission(user,permission))tasks.push(query<{id:string;title:string;subtitle:string;score:number}>(sql,values).then(r=>({type,rows:r.rows})));};
+ // Tasks are thunks: nothing touches the database until limited() runs them.
+ const tasks:(()=>Promise<{type:SearchResult['type'];rows:{id:string;title:string;subtitle:string;score:number;href?:string}[]}>)[]=[];
+ const add=(permission:Permission,type:SearchResult['type'],sql:string)=>{if(hasPermission(user,permission))tasks.push(()=>query<{id:string;title:string;subtitle:string;score:number}>(sql,values).then(r=>({type,rows:r.rows})));};
  const rank=(title:string,identifiers:string,text:string)=>`CASE WHEN lower(${identifiers})=$2 THEN 1000 WHEN ${title} ILIKE $3 THEN 700 WHEN ${text} ILIKE $1 THEN 500 ELSE (greatest(similarity(lower(${title}),$2),word_similarity($2,lower(${text})))*300)::int END`;
  const text="concat_ws(' ',a.asset_id,a.name,a.serial_number,a.rfid_tag,a.fixed_asset_number,a.manufacturer,a.model,a.hostname,a.mac_address::text,host(a.ip_address),e.name,l.path,i.number)";
  add('asset.view','asset',`WITH candidates AS (
@@ -27,7 +37,7 @@ export async function searchHardware(raw:string,user:User):Promise<SearchResult[
  add('config.view','config',`SELECT id::text AS id,name AS title,concat_ws(' · ',manufacturer,model,'v'||latest_version) AS subtitle,${rank('name','name',"concat_ws(' ',name,manufacturer,model,description)")} AS score FROM configurations WHERE concat_ws(' ',name,manufacturer,model,description) ILIKE $1 OR name % $2 ORDER BY score DESC,updated_at DESC LIMIT 6`);
  add('document.view','document',`SELECT a.id::text AS id,a.original_name AS title,concat_ws(' · ',u.name,a.mime_type) AS subtitle,${rank('a.original_name','a.original_name','a.original_name')} AS score FROM attachments a JOIN users u ON u.id=a.uploaded_by WHERE a.invoice_id IS NULL AND a.content IS NOT NULL AND NOT EXISTS(SELECT 1 FROM configuration_versions v WHERE v.attachment_id=a.id) AND (a.original_name ILIKE $1 OR a.original_name % $2) ORDER BY score DESC,a.created_at DESC LIMIT 6`);
  add('user.view','user',`SELECT id::text AS id,name AS title,concat_ws(' · ',email,role) AS subtitle,${rank('name','email',"(name||' '||email)")} AS score FROM users WHERE name ILIKE $1 OR email ILIKE $1 OR name % $2 ORDER BY score DESC,name LIMIT 6`);
- if(hasPermission(user,'document.view'))tasks.push(query<{id:string;title:string;subtitle:string;score:number;href:string}>(`SELECT id::text AS id,reference AS title,snapshot->'subject'->>'name' AS subtitle,${rank('reference','reference',"(reference||' '||(snapshot->'subject'->>'name'))")} AS score,'/documents?equipmentDocument='||id::text AS href FROM equipment_documents WHERE reference ILIKE $1 OR snapshot->'subject'->>'name' ILIKE $1 ORDER BY score DESC,created_at DESC LIMIT 6`,values).then(r=>({type:'document',rows:r.rows})));
+ if(hasPermission(user,'document.view'))tasks.push(()=>query<{id:string;title:string;subtitle:string;score:number;href:string}>(`SELECT id::text AS id,reference AS title,snapshot->'subject'->>'name' AS subtitle,${rank('reference','reference',"(reference||' '||(snapshot->'subject'->>'name'))")} AS score,'/documents?equipmentDocument='||id::text AS href FROM equipment_documents WHERE reference ILIKE $1 OR snapshot->'subject'->>'name' ILIKE $1 ORDER BY score DESC,created_at DESC LIMIT 6`,values).then(r=>({type:'document',rows:r.rows})));
  const href:Record<SearchResult['type'],(id:string)=>string>={asset:id=>`/asset/${encodeURIComponent(id)}`,inventory:id=>`/inventory/${encodeURIComponent(id)}`,invoice:id=>`/invoice/${id}`,location:id=>`/locations?selected=${id}`,employee:id=>`/employees/${id}`,incident:id=>`/incidents/${id}`,config:id=>`/configs/${id}`,document:id=>`/documents?selected=${id}`,user:()=>'/users'};
- return (await Promise.all(tasks)).flatMap(({type,rows})=>rows.map(r=>({...r,type,href:r.href??(type==='user'?'/users?q='+encodeURIComponent(r.subtitle.split(' · ')[0]):type==='document'?'/documents?selected='+r.id+'&q='+encodeURIComponent(r.title):href[type](r.id))}))).sort((a,b)=>b.score-a.score||a.title.localeCompare(b.title,'pl')).slice(0,40);
+ return (await limited(tasks,signal)).flatMap(({type,rows})=>rows.map(r=>({...r,type,href:r.href??(type==='user'?'/users?q='+encodeURIComponent(r.subtitle.split(' · ')[0]):type==='document'?'/documents?selected='+r.id+'&q='+encodeURIComponent(r.title):href[type](r.id))}))).sort((a,b)=>b.score-a.score||a.title.localeCompare(b.title,'pl')).slice(0,40);
 }

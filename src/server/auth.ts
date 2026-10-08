@@ -32,15 +32,21 @@ export function checkCsrf(request: NextRequest, user: SessionUser) {
 export async function getSession(request: NextRequest, allowPasswordChange=false): Promise<SessionUser> {
   const token = request.cookies.get(cookieName)?.value;
   if (!token || !/^[a-f0-9]{64}$/.test(token)) throw new AppError(401, 'Zaloguj się, aby kontynuować.');
-  const result = await query<SessionUser>(`SELECT u.id,u.name,u.email,u.role,u.active,u.permission_role_id AS "customRoleId",u.last_login_at AS "lastLoginAt",u.must_change_password AS "mustChangePassword",u.password_version AS "passwordVersion",u.password_changed_at AS "passwordChangedAt",s.csrf_token AS "csrfToken" FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active AND s.password_version=u.password_version`, [digest(token)]);
-  if (!result.rows[0]) throw new AppError(401, 'Sesja wygasła. Zaloguj się ponownie.');
-  if(!allowPasswordChange) requirePasswordReady(result.rows[0]);
-  return withPermissions(result.rows[0]);
+  // One round trip: the custom role (if any) is joined instead of read separately.
+  const result = await query<SessionUser&{customPermissions:Permission[]|null}>(`SELECT u.id,u.name,u.email,u.role,u.active,u.permission_role_id AS "customRoleId",u.last_login_at AS "lastLoginAt",u.must_change_password AS "mustChangePassword",u.password_version AS "passwordVersion",u.password_changed_at AS "passwordChangedAt",s.csrf_token AS "csrfToken",p.name AS "customRoleName",p.permissions AS "customPermissions" FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN permission_roles p ON p.id=u.permission_role_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active AND s.password_version=u.password_version`, [digest(token)]);
+  const row = result.rows[0];
+  if (!row) throw new AppError(401, 'Sesja wygasła. Zaloguj się ponownie.');
+  if(!allowPasswordChange) requirePasswordReady(row);
+  const {customPermissions,...user} = row;
+  return applyPermissions(user,row.customRoleId&&customPermissions?{name:row.customRoleName??'',permissions:customPermissions}:null);
 }
 export function requirePasswordReady(user:User){if(user.mustChangePassword)throw new AppError(403,'Ustaw własne hasło przed rozpoczęciem pracy w systemie.','PASSWORD_CHANGE_REQUIRED');}
+function applyPermissions<T extends User>(user:T,custom:{name:string;permissions:Permission[]}|null|undefined):T{
+ return {...user,permissions:user.mustChangePassword?[]:effectivePermissions(user.role,custom?.permissions),customRoleName:custom?.name??null};
+}
 async function withPermissions<T extends User>(user:T):Promise<T>{
  const custom=user.customRoleId?(await query<{name:string;permissions:Permission[]}>('SELECT name,permissions FROM permission_roles WHERE id=$1',[user.customRoleId])).rows[0]:null;
- return {...user,permissions:user.mustChangePassword?[]:effectivePermissions(user.role,custom?.permissions),customRoleName:custom?.name??null};
+ return applyPermissions(user,custom);
 }
 export async function issueSession(response: NextResponse, user: User): Promise<SessionUser> {
   const token = randomBytes(32).toString('hex');
