@@ -57,6 +57,9 @@ export async function revokeSession(request: NextRequest, response: NextResponse
   response.cookies.set(cookieName, '', { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/', maxAge: 0 });
 }
 export async function throttle(key: string, limit = 8, seconds = 900) {
+  // Windows last at most 15 minutes; occasionally drop rows that can no longer
+  // limit anything, so distinct keys do not accumulate forever (F04).
+  if (Math.random() < 0.02) await query("DELETE FROM auth_rate_limits WHERE window_start < now() - interval '1 hour'");
   const result = await query<{attempts:number}>(`INSERT INTO auth_rate_limits(key,attempts,window_start) VALUES($1,1,now()) ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN auth_rate_limits.window_start<now()-($2*interval '1 second') THEN 1 ELSE auth_rate_limits.attempts+1 END, window_start=CASE WHEN auth_rate_limits.window_start<now()-($2*interval '1 second') THEN now() ELSE auth_rate_limits.window_start END RETURNING attempts`, [key,seconds]);
   if (result.rows[0].attempts > limit) throw new AppError(429, 'Zbyt wiele prób. Spróbuj ponownie za 15 minut.');
 }

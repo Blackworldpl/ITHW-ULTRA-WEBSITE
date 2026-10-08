@@ -36,8 +36,8 @@ jobs:
     env:
       TEST_DATABASE_URL: postgresql://ithardware:ci-only-password@127.0.0.1:5432/ithardware_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -55,8 +55,22 @@ jobs:
         run: npm run db:migrate 2>&1 | tee -a ci-logs-migrate.log; exit ${PIPESTATUS[0]}
       - name: Integration tests (PostgreSQL 18)
         run: npm run test:integration 2>&1 | tee -a ci-logs-integration.log; exit ${PIPESTATUS[0]}
+      - name: Test totals
+        if: always()
+        run: |
+          for log in ci-logs-unit.log ci-logs-integration.log; do
+            [ -f "$log" ] || continue
+            totals=$(grep -E '^(# |ℹ )(tests|suites|pass|fail|cancelled|skipped|todo) [0-9]+' "$log" | tr '\n' ' ')
+            echo "::notice title=${log}::${totals:-no totals found}"
+          done
       - name: Production build
         run: npm run build 2>&1 | tee -a ci-logs-build.log; exit ${PIPESTATUS[0]}
+      - name: Bundle sizes
+        run: |
+          # Total client chunks and the largest files, to compare before/after code splitting.
+          du -sb .next/static/chunks | awk '{printf "client chunks: %.0f KB\n", $1/1024}' | tee -a ci-logs-bundle.log
+          ls -S .next/static/chunks/*.js | head -n 8 | xargs -I{} sh -c 'printf "%s %s KB\n" "$(basename {})" "$(( $(stat -c%s {}) / 1024 ))"' | tee -a ci-logs-bundle.log
+          echo "::notice title=bundle::$(tr '\n' ' ' < ci-logs-bundle.log)"
       - name: Report failures as annotations
         if: failure()
         run: |
@@ -73,7 +87,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build runtime image
         run: docker build --target runtime -t ithw:ci . 2>&1 | tee -a ci-logs-docker.log; exit ${PIPESTATUS[0]}
       - name: Static assets are served from the image

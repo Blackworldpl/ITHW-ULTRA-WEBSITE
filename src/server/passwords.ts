@@ -1,8 +1,24 @@
 import { randomBytes, scrypt, timingSafeEqual, createHash } from 'node:crypto';
 
 const options = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+
+// Async scrypt runs on the libuv thread pool (4 threads by default), which also
+// serves file I/O, DNS lookups and compression. Cap concurrent derivations so a
+// burst of logins or invitations cannot starve the rest of the server.
+const maxConcurrent = 2, maxQueued = 64;
+let active = 0;
+const waiting: (() => void)[] = [];
+/** Thrown when the derivation queue is full; the API maps the code to HTTP 503. */
+export class PasswordBusyError extends Error { readonly code = 'PASSWORD_BUSY'; }
+async function withSlot<T>(work: () => Promise<T>): Promise<T> {
+  if (active < maxConcurrent) active++;
+  else if (waiting.length >= maxQueued) throw new PasswordBusyError('Password hashing queue is full.');
+  else await new Promise<void>(resolve => waiting.push(resolve)); // The releasing caller hands over its slot.
+  try { return await work(); }
+  finally { const next = waiting.shift(); if (next) next(); else active--; }
+}
 function derive(password: string, salt: Buffer): Promise<Buffer> {
-  return new Promise((resolve, reject) => scrypt(password, salt, 64, options, (error, key) => error ? reject(error) : resolve(key)));
+  return withSlot(() => new Promise((resolve, reject) => scrypt(password, salt, 64, options, (error, key) => error ? reject(error) : resolve(key))));
 }
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16);

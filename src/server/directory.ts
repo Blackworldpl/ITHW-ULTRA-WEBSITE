@@ -1,6 +1,7 @@
 import {z} from 'zod';
 import type {Category,Employee,Supplier,User} from '@/shared/types';
 import {requireRole} from './auth';
+import {hasPermission} from '@/shared/permissions';
 import {hashPassword} from './passwords';
 import {query,transaction} from './db';
 import {AppError} from './errors';
@@ -30,8 +31,10 @@ export async function saveDictionary(kind:'categories'|'suppliers',id:string|nul
 }
 const employeeProjection=`e.id,e.name,e.employee_number AS "employeeNumber",e.email,e.phone,e.department,e.position,e.location_id AS "locationId",l.path AS "locationName",e.user_id AS "userId",u.active AS "userActive",e.active,e.notes,e.version,(SELECT count(*)::integer FROM assets a WHERE a.employee_id=e.id) AS "assetCount"`;
 const employeeFrom='FROM employees e LEFT JOIN location_paths l ON l.id=e.location_id LEFT JOIN users u ON u.id=e.user_id';
-export async function listEmployees(){return clean((await query<Employee>(`SELECT ${employeeProjection} ${employeeFrom} ORDER BY e.active DESC,e.name,e.id`)).rows);}
-export async function getEmployee(id:string){parse(uuidSchema,id);const employee=(await query<Employee>(`SELECT ${employeeProjection} ${employeeFrom} WHERE e.id=$1`,[id])).rows[0];if(!employee)throw new AppError(404,'Nie znaleziono pracownika.');return clean(employee);}
+// Device counts are equipment data: hidden without asset.view, as for locations.
+function withoutAssetCounts<T extends Employee>(rows:T[],user?:User):T[]{if(user&&!hasPermission(user,'asset.view'))for(const row of rows)delete row.assetCount;return rows;}
+export async function listEmployees(user?:User){return withoutAssetCounts(clean((await query<Employee>(`SELECT ${employeeProjection} ${employeeFrom} ORDER BY e.active DESC,e.name,e.id`)).rows),user);}
+export async function getEmployee(id:string,user?:User){parse(uuidSchema,id);const employee=(await query<Employee>(`SELECT ${employeeProjection} ${employeeFrom} WHERE e.id=$1`,[id])).rows[0];if(!employee)throw new AppError(404,'Nie znaleziono pracownika.');return withoutAssetCounts([clean(employee)],user)[0];}
 const employeeMap:Record<string,string>={name:'name',employeeNumber:'employee_number',email:'email',phone:'phone',department:'department',position:'position',locationId:'location_id',userId:'user_id',active:'active',notes:'notes'};
 export async function saveEmployee(id:string|null,body:unknown,user:User){
  requireRole(user,['IT_ADVANCED','ADMIN']);if(id)parse(uuidSchema,id);const input=parse(employeeSchema,body);

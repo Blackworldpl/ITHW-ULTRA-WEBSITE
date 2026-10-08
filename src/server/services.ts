@@ -7,7 +7,7 @@ import { statuses, statusLabels } from '@/shared/types';
 import { csv } from './csv';
 import {listCategories,listSuppliers,listEmployees,getEmployee,saveDictionary,supplierProjection} from './directory';
 import {categoryFieldError} from '@/shared/category-fields';
-import type {Category,Employee,Supplier} from '@/shared/types';
+import type {Category,Employee,Supplier,SupplierOption} from '@/shared/types';
 import { pool, query, transaction } from './db';
 import { AppError } from './errors';
 import { assetActionSchema, assetIdSchema, assetPatchSchema, assetSchema, categorySchema, dateSchema, deliverySchema, inventoryPatchSchema, inventorySchema, invoiceSchema, invoicePatchSchema, locationSchema, movementSchema, parse, slugSchema, stockCorrectionSchema, supplierSchema, uuidSchema, quantitySchema } from './validation';
@@ -142,10 +142,12 @@ export async function getLookups(user: User): Promise<Lookups> {
   const [categories,locations,suppliers,users,invoices,employees] = await Promise.all([
     listCategories(),
     hasPermission(user,'location.view') ? query<Location>('SELECT id,name,path,kind,parent_id AS "parentId",version,asset_count AS "assetCount",child_count AS "childCount" FROM location_summary ORDER BY path') : Promise.resolve({rows:[] as Location[]}),
-    listSuppliers(),
+    // Bank account, contacts and notes require purchase access (F02). Asset viewers
+    // only need id and name for the supplier filter; names are already on assets.
+    hasPermission(user,'invoice.view') ? listSuppliers() : hasPermission(user,'asset.view') ? query<SupplierOption>('SELECT id,name FROM suppliers ORDER BY name').then(r=>r.rows) : Promise.resolve([] as SupplierOption[]),
     user.role === 'ADMIN' ? query<User>('SELECT id,name,email,role,active FROM users ORDER BY name') : Promise.resolve({rows:[] as User[]}),
     hasPermission(user,'invoice.view') ? query<Pick<Invoice,'id'|'number'>>('SELECT id,number FROM invoices ORDER BY created_at DESC LIMIT 500') : Promise.resolve({rows:[]}),
-    hasPermission(user,'employee.view') ? listEmployees() : Promise.resolve([]),
+    hasPermission(user,'employee.view') ? listEmployees(user) : Promise.resolve([]),
   ]);
   const {serviceNowUrl} = await (await import('./product-operations')).getSystemSettings();
   if(!hasPermission(user,'asset.view')) for(const l of locations.rows) delete l.assetCount;
@@ -284,7 +286,7 @@ const assetColumns: Record<string,string> = {
   employeeId:'employee_id',sku:'sku',productCode:'product_code',
 };
 async function resolveEmployee(client:PoolClient,id:string){const row=(await client.query<{name:string;active:boolean}>('SELECT name,active FROM employees WHERE id=$1 FOR SHARE',[id])).rows[0];if(!row?.active)throw new AppError(400,'Wybierz aktywnego pracownika.');return row.name;}
-async function validateCategory(client:PoolClient,categoryId:string,values:Record<string,string>){const row=(await client.query<Category>('SELECT field_definitions AS "fieldDefinitions" FROM asset_categories WHERE id=$1 FOR SHARE',[categoryId])).rows[0];if(!row)throw new AppError(400,'Nie znaleziono kategorii.');const error=categoryFieldError(row.fieldDefinitions,values);if(error)throw new AppError(400,error);}
+async function validateCategory(client:PoolClient,categoryId:string,values:Record<string,string>,context=''){const row=(await client.query<Category>('SELECT field_definitions AS "fieldDefinitions" FROM asset_categories WHERE id=$1 FOR SHARE',[categoryId])).rows[0];if(!row)throw new AppError(400,'Nie znaleziono kategorii.');const error=categoryFieldError(row.fieldDefinitions,values??{});if(error)throw new AppError(400,context+error);}
 function checkAssetRules(asset: { status: string; owner?: string | null; isFixedAsset: boolean; fixedAssetNumber?: string | null; purchasedAt?: string | null; warrantyUntil?: string | null }) {
   if (asset.status === 'ASSIGNED' && !asset.owner) throw new AppError(400,'Urządzenie wydane musi mieć użytkownika.');
   if (asset.isFixedAsset && !asset.fixedAssetNumber) throw new AppError(400,'Podaj numer środka trwałego.');
@@ -336,7 +338,10 @@ async function applyAssetUpdate(client:PoolClient,assetId:string,input:ReturnTyp
     if(input.rfidTag!==undefined&&input.rfidTag!==before.rfidTag)requirePermission(user,'rfid.edit');
     if(input.invoiceId!==undefined&&input.invoiceId!==before.invoiceId)requirePermission(user,'invoice.edit');
     }
-    if(input.categoryId!==undefined||input.customFields!==undefined)await validateCategory(client,merged.categoryId,merged.customFields);
+    // Equipment received from a purchase may lack category fields (it starts in
+    // PREPARATION); issuing it to a person requires the required fields (F05).
+    const issuing=merged.status==='ASSIGNED'&&(before.status!=='ASSIGNED'||merged.owner!==before.owner||merged.employeeId!==before.employeeId);
+    if(issuing||input.categoryId!==undefined||input.customFields!==undefined)await validateCategory(client,merged.categoryId,merged.customFields,issuing?'Przed wydaniem uzupełnij dane urządzenia. ':'');
     checkAssetRules(merged);
     const entries = Object.entries(input).filter(([key,value]) => key !== 'version' && value !== undefined);
     const values: unknown[] = entries.map(([key,value]) => key === 'customFields' ? JSON.stringify(value) : value);
@@ -504,6 +509,19 @@ type PurchaseLine=ReturnType<typeof invoiceSchema.parse>['items'] extends (infer
 async function insertPurchaseLine(client:PoolClient,invoiceId:string,line:PurchaseLine,position:number,unit:string,precision=0){
  return (await client.query<{id:string}>('INSERT INTO invoice_items(invoice_id,name,quantity,unit_price,inventory_item_id,category_id,position,unit,serial_numbers,manufacturer,model,location_id,quantity_precision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id',[invoiceId,line.name,line.quantity,line.unitPrice,line.kind==='inventory'?line.inventoryItemId:null,line.kind==='asset'?line.categoryId:null,position,unit,JSON.stringify(line.serialNumbers??[]),line.manufacturer??null,line.model??null,line.locationId??null,precision])).rows[0].id;
 }
+// Every purchase path (invoice entry, line completion, legacy delivery) creates
+// equipment through this one function, so permission rules cannot diverge.
+// Purchased equipment starts in PREPARATION; required category fields are
+// enforced when it is issued (see requireIssueReady), not at receipt.
+async function createPurchasedAsset(client:PoolClient,user:User,data:{name:string;categoryId:string;manufacturer?:string|null;model?:string|null;locationId?:string|null;serialNumber?:string|null;purchasedAt:string;unitPrice:string|null;invoiceId:string;invoiceNumber:string},invoiceItemId:string):Promise<Asset>{
+ requirePermission(user,'asset.create');
+ const created=(await client.query<{asset_id:string}>('INSERT INTO assets(name,category_id,manufacturer,model,location_id,serial_number,purchased_at,purchase_price,invoice_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING asset_id',[data.name,data.categoryId,data.manufacturer??null,data.model??null,data.locationId??null,data.serialNumber??null,data.purchasedAt,data.unitPrice,data.invoiceId])).rows[0];
+ const asset=await assetById(created.asset_id,client);
+ await client.query('INSERT INTO invoice_item_assets(invoice_item_id,asset_id) VALUES($1,$2)',[invoiceItemId,asset.id]);
+ await client.query('INSERT INTO qr_codes(asset_id,target_path,created_by) VALUES($1,$2,$3)',[asset.id,`/asset/${asset.assetId}`,user.id]);
+ await assetEvent(client,user,'RECEIVE_ASSET',asset,`Przyjęto ${asset.name} (${asset.assetId}). Faktura ${data.invoiceNumber}.`);
+ return asset;
+}
 async function attachPurchaseAssets(client:PoolClient,user:User,invoice:{id:string;number:string;date:string;currency:string},lineId:string,line:PurchaseLine,createMissing:boolean,fillQuantity=false){
  const preview=await resolveSerials(client,line.serialNumbers??[],invoice.id,lineId,true);
  let createdCount=0;
@@ -523,8 +541,7 @@ async function attachPurchaseAssets(client:PoolClient,user:User,invoice:{id:stri
   }else if(createMissing){
    requirePermission(user,'asset.create');
    if(line.matches?.some(m=>m.serialNumber.toLowerCase()===match?.serialNumber.toLowerCase()))throw new AppError(409,'Dopasowanie zmieniło się. Sprawdź numery ponownie.');
-   const created=(await client.query<{asset_id:string}>('INSERT INTO assets(name,category_id,manufacturer,model,location_id,serial_number,purchased_at,purchase_price,invoice_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING asset_id',[line.name,line.categoryId,line.manufacturer??null,line.model??null,line.locationId??null,match?.serialNumber??null,invoice.date,line.unitPrice,invoice.id])).rows[0];
-   const asset=await assetById(created.asset_id,client);await client.query('INSERT INTO invoice_item_assets(invoice_item_id,asset_id) VALUES($1,$2)',[lineId,asset.id]);await client.query('INSERT INTO qr_codes(asset_id,target_path,created_by) VALUES($1,$2,$3)',[asset.id,`/asset/${asset.assetId}`,user.id]);await assetEvent(client,user,'RECEIVE_ASSET',asset,`Przyjęto ${asset.name} (${asset.assetId}). Faktura ${invoice.number}.`);createdCount++;
+   await createPurchasedAsset(client,user,{name:line.name!,categoryId:line.categoryId!,manufacturer:line.manufacturer,model:line.model,locationId:line.locationId,serialNumber:match?.serialNumber??null,purchasedAt:invoice.date,unitPrice:line.unitPrice??null,invoiceId:invoice.id,invoiceNumber:invoice.number},lineId);createdCount++;
   }
  }
  return createdCount;
@@ -535,7 +552,7 @@ async function recordAssetReceipt(client:PoolClient,user:User,invoiceId:string,l
  await audit(client,user,'RECEIVE_DELIVERY','delivery',deliveryId,`Przyjęto ${count} nowych urządzeń z faktury.`,null,{invoiceId,lineId,count});
 }
 export async function createInvoice(body:unknown,user:User):Promise<Invoice>{
- requireRole(user,advancedRoles);const input=parse(invoiceSchema,body),total=input.items?purchaseTotal(input.items):null;
+ requireRole(user,advancedRoles);requirePermission(user,'invoice.edit');const input=parse(invoiceSchema,body),total=input.items?purchaseTotal(input.items):null;
  if(input.items&&input.amount!==null&&total!==null&&moneyCents(input.amount)!==moneyCents(total))throw new AppError(400,'Kwota faktury musi odpowiadać sumie pozycji.');
  if(input.receive&&!input.items?.some(l=>l.kind!=='other'))throw new AppError(400,'Dodaj urządzenie lub produkt, aby przyjąć zakup.');
  if((input.items?.filter(l=>l.kind==='asset').reduce((s,l)=>s+l.quantity,0)??0)>1000)throw new AppError(400,'Najwyżej 1000 urządzeń na fakturze.');
@@ -557,7 +574,7 @@ export async function createInvoice(body:unknown,user:User):Promise<Invoice>{
  };return input.requestId?idempotent(client,user,input.requestId,'CREATE_INVOICE',input,apply):apply();});
 }
 export async function completeInvoiceLine(invoiceId:string,lineId:string,body:unknown,user:User){
- requireRole(user,advancedRoles);requirePermission(user,'asset.view');parse(uuidSchema,invoiceId);parse(uuidSchema,lineId);
+ requireRole(user,advancedRoles);requirePermission(user,'invoice.edit');requirePermission(user,'asset.view');parse(uuidSchema,invoiceId);parse(uuidSchema,lineId);
  const input=parse(serialPreviewSchema.omit({invoiceId:true,lineId:true}).extend({matches:z.array(z.object({serialNumber:z.string().trim().min(1).max(160),assetId:assetIdSchema,version:z.number().int().positive()}).strict()).max(1000).default([]),createMissing:z.boolean().default(false),version:z.number().int().positive(),requestId:uuidSchema}).strict(),body);
  return mutate(client=>idempotent(client,user,input.requestId,'INVOICE_SERIALS:'+lineId,input,async()=>{
   const invoice=(await client.query<Invoice>(`SELECT ${invoiceProjection} ${invoiceFrom} WHERE i.id=$1 FOR UPDATE OF i`,[invoiceId])).rows[0];if(!invoice)throw new AppError(404,'Nie znaleziono faktury.');if(invoice.version!==input.version)throw new AppError(409,'Faktura zmieniła się. Odśwież dane.');
@@ -570,7 +587,7 @@ export async function completeInvoiceLine(invoiceId:string,lineId:string,body:un
 }
 
 export async function receiveInvoiceStock(invoiceId:string,lineId:string,body:unknown,user:User){
- requireRole(user,advancedRoles);requirePermission(user,'inventory.move');parse(uuidSchema,invoiceId);parse(uuidSchema,lineId);
+ requireRole(user,advancedRoles);requirePermission(user,'invoice.edit');requirePermission(user,'inventory.move');parse(uuidSchema,invoiceId);parse(uuidSchema,lineId);
  const input=parse(z.object({quantity:quantitySchema(),version:z.number().int().positive(),requestId:uuidSchema}).strict(),body);
  return mutate(client=>idempotent(client,user,input.requestId,'INVOICE_STOCK:'+lineId,input,async()=>{
   const invoice=(await client.query<{version:number;number:string}>('SELECT version,number FROM invoices WHERE id=$1 FOR UPDATE',[invoiceId])).rows[0];if(!invoice)throw new AppError(404,'Nie znaleziono faktury.');if(invoice.version!==input.version)throw new AppError(409,'Faktura zmieniła się. Odśwież dane.');
@@ -588,7 +605,7 @@ export async function receiveInvoiceStock(invoiceId:string,lineId:string,body:un
 }
 
 export async function updateInvoice(id:string,body:unknown,user:User):Promise<Invoice>{
- requireRole(user,advancedRoles);parse(uuidSchema,id);const input=parse(invoicePatchSchema,body);
+ requireRole(user,advancedRoles);requirePermission(user,'invoice.edit');parse(uuidSchema,id);const input=parse(invoicePatchSchema,body);
  if(input.items&&input.amount!==null&&purchaseTotal(input.items)!==null&&moneyCents(input.amount)!==moneyCents(purchaseTotal(input.items)!))throw new AppError(400,'Kwota faktury musi odpowiadać sumie pozycji.');
  return mutate(async client=>{
   const before=(await client.query<Invoice>(`SELECT ${invoiceProjection} ${invoiceFrom} WHERE i.id=$1 FOR UPDATE OF i`,[id])).rows[0];
@@ -600,8 +617,8 @@ export async function updateInvoice(id:string,body:unknown,user:User):Promise<In
    priceChanges={before:rows,after:input.itemPrices};
    for(const price of input.itemPrices)await client.query('UPDATE invoice_items SET unit_price=$2 WHERE id=$1',[price.id,price.unitPrice]);
    const prices=new Map(input.itemPrices.map(p=>[p.id,p.unitPrice]));
-   totalAfter=purchaseTotal(rows.map(r=>({quantity:r.quantity,unitPrice:prices.has(r.id)?prices.get(r.id)!:r.unitPrice})));
-   if(input.amount!==null&&totalAfter!==null&&moneyCents(input.amount)!==moneyCents(totalAfter))throw new AppError(400,'Kwota faktury musi odpowiadać sumie pozycji.');
+   const pricedTotal=purchaseTotal(rows.map(r=>({quantity:r.quantity,unitPrice:prices.has(r.id)?prices.get(r.id)!:r.unitPrice})));
+   if(input.amount!==null&&pricedTotal!==null&&moneyCents(input.amount)!==moneyCents(pricedTotal))throw new AppError(400,'Kwota faktury musi odpowiadać sumie pozycji.');
   }
   if(input.items){
    const serials=input.items.flatMap(l=>l.serialNumbers??[]);if(serials.length)requirePermission(user,'asset.view');await resolveSerials(client,serials,id,undefined,true);
@@ -617,6 +634,9 @@ export async function updateInvoice(id:string,body:unknown,user:User):Promise<In
    }
   }
   if(input.currency!==before.currency&&(await client.query('SELECT id FROM assets WHERE invoice_id=$1 LIMIT 1',[id])).rowCount)throw new AppError(409,'Nie można zmienić waluty faktury z powiązanym sprzętem. Wymaga to sprawdzenia wartości zakupu.');
+  // As in createInvoice: a missing amount means the sum of the (current) lines.
+  // A line without a price keeps the total unknown (null), never zero.
+  if(input.amount===null){const lines=(await client.query<{quantity:number;unitPrice:string|null}>('SELECT quantity::float8 AS quantity,unit_price::text AS "unitPrice" FROM invoice_items WHERE invoice_id=$1',[id])).rows;totalAfter=lines.length?purchaseTotal(lines):null;}
   await client.query('UPDATE invoices SET number=$2,supplier_id=$3,date=$4,amount=$5,currency=$6,order_number=$7,notes=$8,version=version+1 WHERE id=$1',[id,input.number,input.supplierId,input.date,input.amount??totalAfter,input.currency,input.orderNumber??null,input.notes??null]);
   const after=(await client.query<Invoice>(`SELECT ${invoiceProjection} ${invoiceFrom} WHERE i.id=$1`,[id])).rows[0];
   await audit(client,user,'UPDATE_INVOICE','invoice',id,`Zmieniono fakturę ${after.number}.`,priceChanges?{...before,itemPrices:priceChanges.before}:before,priceChanges?{...after,itemPrices:priceChanges.after}:after);return clean(after);
@@ -646,7 +666,12 @@ export async function listDeliveries(params: URLSearchParams): Promise<PageResul
 }
 export async function receiveDelivery(body: unknown, user: User): Promise<Delivery> {
   requireRole(user,advancedRoles);
+  requirePermission(user,'invoice.edit');
   const input = parse(deliverySchema,body);
+  // Legacy receipt: every product line moves stock and every device line creates
+  // equipment, so check both before any write (the transaction also rolls back).
+  if(input.items.some(line=>line.kind==='inventory'))requirePermission(user,'inventory.move');
+  if(input.items.some(line=>line.kind==='asset'))requirePermission(user,'asset.create');
   return mutate(client => idempotent(client,user,input.requestId,'delivery:receive',input,async () => {
     const invoice = await client.query<{id:string}>(`INSERT INTO invoices(number,supplier_id,date,currency,order_number,received_by)
       VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,[input.invoiceNumber,input.supplierId,input.date,input.currency,input.orderNumber ?? null,user.id]);
@@ -669,13 +694,7 @@ export async function receiveDelivery(body: unknown, user: User): Promise<Delive
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,[invoiceId,line.name,line.quantity,line.unitPrice,line.categoryId,position+1,JSON.stringify(line.serialNumbers??[]),line.manufacturer??null,line.model??null,line.locationId??null]);
         await client.query('INSERT INTO delivery_items(delivery_id,invoice_item_id,quantity) VALUES($1,$2,$3)',[deliveryId,invoiceLine.rows[0].id,line.quantity]);
         for (let index=0; index<line.quantity; index++) {
-          const created = await client.query<{asset_id:string}>(`INSERT INTO assets(name,category_id,manufacturer,model,location_id,serial_number,purchased_at,purchase_price,invoice_id)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING asset_id`,
-            [line.name,line.categoryId,line.manufacturer ?? null,line.model ?? null,line.locationId ?? null,line.serialNumbers?.[index] ?? null,input.date,line.unitPrice,invoiceId]);
-          const asset = await assetById(created.rows[0].asset_id,client);
-          await client.query('INSERT INTO invoice_item_assets(invoice_item_id,asset_id) VALUES($1,$2)',[invoiceLine.rows[0].id,asset.id]);
-          await client.query('INSERT INTO qr_codes(asset_id,target_path,created_by) VALUES($1,$2,$3)',[asset.id,`/asset/${asset.assetId}`,user.id]);
-          await assetEvent(client,user,'RECEIVE_ASSET',asset,`Przyjęto ${asset.name} (${asset.assetId}). Faktura ${input.invoiceNumber}.`);
+          await createPurchasedAsset(client,user,{name:line.name,categoryId:line.categoryId,manufacturer:line.manufacturer,model:line.model,locationId:line.locationId,serialNumber:line.serialNumbers?.[index] ?? null,purchasedAt:input.date,unitPrice:line.unitPrice,invoiceId,invoiceNumber:input.invoiceNumber},invoiceLine.rows[0].id);
         }
       }
     }
