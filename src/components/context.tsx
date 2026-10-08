@@ -6,9 +6,10 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
 } from "react";
 import { useRouter,usePathname } from "next/navigation";
-import type { Lookups, SessionUser } from "@/shared/types";
+import type { LookupPart, Lookups, SessionUser } from "@/shared/types";
 import { api, ApiFailure, Button, ErrorMessage, Loading,useResource } from "./ui";
 import type {OperationsSummary} from '@/shared/product';
 import Link from "next/link";
@@ -19,7 +20,8 @@ interface AppState {
   user: SessionUser;
   lookups: Lookups | null;
   lookupError: string;
-  refreshLookups: () => void;
+  /** Reloads shared dictionaries; pass the parts a screen changed to fetch only those. */
+  refreshLookups: (parts?: LookupPart[]) => void;
   operations:{data:OperationsSummary|null;error:string;loading:boolean;reload:()=>void};
 }
 const AppContext = createContext<AppState | null>(null);
@@ -36,11 +38,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [lookupError, setLookupError] = useState("");
   const [revision, setRevision] = useState(0);
   const pathname=usePathname(),operations=useResource<OperationsSummary>(user?'/api/operations':null);
+  const operationsReload=useRef(operations.reload);operationsReload.current=operations.reload;
   useEffect(()=>{operations.reload();},[pathname,revision,operations.reload]);
-  const refreshLookups = useCallback(
-    () => setRevision((value) => value + 1),
-    [],
-  );
+  const refreshLookups = useCallback((parts?: LookupPart[]) => {
+    if (!parts?.length) { setRevision((value) => value + 1); return; }
+    // Fetch only the changed dictionaries and merge them; the session and the
+    // remaining dictionaries stay as they are.
+    api<Partial<Lookups>>(`/api/lookups?only=${parts.join(",")}`)
+      .then((value) => { setLookups((previous) => (previous ? { ...previous, ...value } : previous)); setLookupError(""); })
+      .catch((err) => setLookupError(err.message));
+    operationsReload.current();
+  }, []);
   useEffect(() => {
     let current = true;
     api<SessionUser>("/api/auth/me")

@@ -78,17 +78,20 @@ test('Audit regressions: alternative API paths respect fine-grained permissions'
   await t.test('F02: lookups disclose supplier details and device counts only with matching permissions',async()=>{
    await account('EMPTY','VIEWER',[]);await account('ASSETS','VIEWER',['asset.view']);await account('STAFF','VIEWER',['employee.view']);
    const empty=await data(await call('GET','lookups',undefined,'EMPTY'));
-   assert.deepEqual(empty.suppliers,[]);assert.deepEqual(empty.employees,[]);
+   assert.deepEqual(empty.suppliers,[]);assert.ok(!('employees' in empty)&&!('invoices' in empty),'lookups no longer carry employees or invoices');
+   assert.equal((await call('GET','employees?q=Audit',undefined,'EMPTY')).status,403);
    const assets=await data(await call('GET','lookups',undefined,'ASSETS'));
    const option=assets.suppliers.find((s:any)=>s.id===supplier.id);assert.deepEqual(option,{id:supplier.id,name:supplier.name});
    assert.ok(assets.suppliers.every((s:any)=>Object.keys(s).sort().join()==='id,name'));
-   const staff=await data(await call('GET','lookups',undefined,'STAFF'));
-   assert.ok(staff.employees.some((e:any)=>e.id===employee.id));assert.ok(staff.employees.every((e:any)=>!('assetCount' in e)));
+   const found=await data(await call('GET','employees?q='+encodeURIComponent('audit employee '+tag),undefined,'STAFF'));
+   assert.deepEqual(found.map((e:any)=>e.id),[employee.id]);assert.ok(!('assetCount' in found[0]));
    assert.ok((await data(await call('GET','employees',undefined,'STAFF'))).every((e:any)=>!('assetCount' in e)));
    assert.ok(!('assetCount' in await data(await call('GET','employees/'+employee.id,undefined,'STAFF'))));
    const full=await data(await call('GET','lookups'));
    assert.equal(full.suppliers.find((s:any)=>s.id===supplier.id).bankAccount,supplier.bankAccount);
-   assert.equal(typeof full.employees.find((e:any)=>e.id===employee.id).assetCount,'number');
+   assert.equal(typeof (await data(await call('GET','employees/'+employee.id))).assetCount,'number');
+   assert.deepEqual(Object.keys(await data(await call('GET','lookups?only=suppliers'))),['suppliers']);
+   assert.equal((await call('GET','lookups?only=employees')).status,400);
   });
 
   await t.test('F03: shortage export requires inventory.view like the inventory screen',async()=>{

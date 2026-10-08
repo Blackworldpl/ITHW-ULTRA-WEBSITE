@@ -33,7 +33,15 @@ const employeeProjection=`e.id,e.name,e.employee_number AS "employeeNumber",e.em
 const employeeFrom='FROM employees e LEFT JOIN location_paths l ON l.id=e.location_id LEFT JOIN users u ON u.id=e.user_id';
 // Device counts are equipment data: hidden without asset.view, as for locations.
 function withoutAssetCounts<T extends Employee>(rows:T[],user?:User):T[]{if(user&&!hasPermission(user,'asset.view'))for(const row of rows)delete row.assetCount;return rows;}
-export async function listEmployees(user?:User){return withoutAssetCounts(clean((await query<Employee>(`SELECT ${employeeProjection} ${employeeFrom} ORDER BY e.active DESC,e.name,e.id`)).rows),user);}
+const folded=(expression:string)=>`translate(${expression},'ąćęłńóśźżĄĆĘŁŃÓŚŹŻ','acelnoszzACELNOSZZ')`;
+/** All employees, or with `q` the first 30 whose name, number, department or e-mail contain every word (picker search). */
+export async function listEmployees(user?:User,q?:string|null){
+ const words=[...new Set((q??'').normalize('NFC').trim().split(/\s+/).filter(Boolean))].slice(0,8);
+ if(q&&q.length>200)throw new AppError(400,'Wyszukiwanie może mieć najwyżej 200 znaków.');
+ const where=words.map((_,i)=>`${folded("concat_ws(' ',e.name,e.employee_number,e.department,e.email)")} ILIKE ${folded('$'+(i+1))}`).join(' AND ');
+ const values=words.map(word=>'%'+word.replace(/[\\%_]/g,c=>'\\'+c)+'%');
+ return withoutAssetCounts(clean((await query<Employee>(`SELECT ${employeeProjection} ${employeeFrom} ${where?'WHERE '+where:''} ORDER BY e.active DESC,e.name,e.id ${words.length?'LIMIT 30':''}`,values)).rows),user);
+}
 export async function getEmployee(id:string,user?:User){parse(uuidSchema,id);const employee=(await query<Employee>(`SELECT ${employeeProjection} ${employeeFrom} WHERE e.id=$1`,[id])).rows[0];if(!employee)throw new AppError(404,'Nie znaleziono pracownika.');return withoutAssetCounts([clean(employee)],user)[0];}
 const employeeMap:Record<string,string>={name:'name',employeeNumber:'employee_number',email:'email',phone:'phone',department:'department',position:'position',locationId:'location_id',userId:'user_id',active:'active',notes:'notes'};
 export async function saveEmployee(id:string|null,body:unknown,user:User){

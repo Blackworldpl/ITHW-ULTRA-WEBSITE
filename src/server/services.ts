@@ -9,6 +9,7 @@ import {listCategories,listSuppliers,listEmployees,getEmployee,saveDictionary,su
 import {categoryFieldError} from '@/shared/category-fields';
 import type {Category,Employee,Supplier,SupplierOption} from '@/shared/types';
 import { pool, query, transaction } from './db';
+import {lookupParts,type LookupPart} from '@/shared/types';
 import { AppError } from './errors';
 import { assetActionSchema, assetIdSchema, assetPatchSchema, assetSchema, categorySchema, dateSchema, deliverySchema, inventoryPatchSchema, inventorySchema, invoiceSchema, invoicePatchSchema, locationSchema, movementSchema, parse, slugSchema, stockCorrectionSchema, supplierSchema, uuidSchema, quantitySchema } from './validation';
 import {invoiceTotal,purchaseTotal,moneyCents} from '@/shared/money';
@@ -186,20 +187,25 @@ function searchTerm(params: URLSearchParams): string | null {
   return `%${escapeLike(term)}%`;
 }
 
-export async function getLookups(user: User): Promise<Lookups> {
-  const [categories,locations,suppliers,users,invoices,employees] = await Promise.all([
-    listCategories(),
-    hasPermission(user,'location.view') ? query<Location>('SELECT id,name,path,kind,parent_id AS "parentId",version,asset_count AS "assetCount",child_count AS "childCount" FROM location_summary ORDER BY path') : Promise.resolve({rows:[] as Location[]}),
+// Shared dictionaries loaded at start and after edits. Employees and invoices are
+// no longer included (they were most of the payload): the pickers search them on
+// demand. `only` returns just the parts a screen changed.
+export async function getLookups(user: User, only?: string | null): Promise<Partial<Lookups>> {
+  const parts = new Set<LookupPart>(only ? only.split(',').map(part => parse(z.enum(lookupParts), part.trim())) : lookupParts);
+  const result: Partial<Lookups> = {};
+  await Promise.all([
+    parts.has('categories') && listCategories().then(rows => { result.categories = rows; }),
+    parts.has('locations') && (hasPermission(user,'location.view') ? query<Location>('SELECT id,name,path,kind,parent_id AS "parentId",version,asset_count AS "assetCount",child_count AS "childCount" FROM location_summary ORDER BY path').then(r => r.rows) : Promise.resolve([] as Location[])).then(rows => {
+      if(!hasPermission(user,'asset.view')) for(const l of rows) delete l.assetCount;
+      result.locations = rows;
+    }),
     // Bank account, contacts and notes require purchase access (F02). Asset viewers
     // only need id and name for the supplier filter; names are already on assets.
-    hasPermission(user,'invoice.view') ? listSuppliers() : hasPermission(user,'asset.view') ? query<SupplierOption>('SELECT id,name FROM suppliers ORDER BY name').then(r=>r.rows) : Promise.resolve([] as SupplierOption[]),
-    user.role === 'ADMIN' ? query<User>('SELECT id,name,email,role,active FROM users ORDER BY name') : Promise.resolve({rows:[] as User[]}),
-    hasPermission(user,'invoice.view') ? query<Pick<Invoice,'id'|'number'>>('SELECT id,number FROM invoices ORDER BY created_at DESC LIMIT 500') : Promise.resolve({rows:[]}),
-    hasPermission(user,'employee.view') ? listEmployees(user) : Promise.resolve([]),
+    parts.has('suppliers') && (hasPermission(user,'invoice.view') ? listSuppliers() : hasPermission(user,'asset.view') ? query<SupplierOption>('SELECT id,name FROM suppliers ORDER BY name').then(r=>r.rows) : Promise.resolve([] as SupplierOption[])).then(rows => { result.suppliers = rows; }),
+    parts.has('users') && (user.role === 'ADMIN' ? query<User>('SELECT id,name,email,role,active FROM users ORDER BY name').then(r => r.rows) : Promise.resolve([] as User[])).then(rows => { result.users = rows; }),
+    parts.has('settings') && import('./product-operations').then(module => module.getSystemSettings()).then(settings => { result.serviceNowUrl = settings.serviceNowUrl; }),
   ]);
-  const {serviceNowUrl} = await (await import('./product-operations')).getSystemSettings();
-  if(!hasPermission(user,'asset.view')) for(const l of locations.rows) delete l.assetCount;
-  return clean({categories,locations:locations.rows,suppliers,users:users.rows,invoices:invoices.rows,employees,serviceNowUrl});
+  return result;
 }
 
 export async function getDashboard(user: User): Promise<Dashboard> {

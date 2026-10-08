@@ -120,7 +120,7 @@ async function handle(request: NextRequest, context: Context) {
     if(key==='admin/users/invite'&&method==='POST')return success(await access.inviteUser(await readJson(request),user),201);
     if(key==='admin/settings'&&method==='GET')return success(await product.getSystemSettings());
     if(key==='admin/settings'&&method==='PATCH')return success(await product.saveSystemSettings(await readJson(request),user));
-    if(key==='lookups' && method==='GET') return success(await service.getLookups(user));
+    if(key==='lookups' && method==='GET') return success(await service.getLookups(user,params.get('only')));
     if(key==='workstations'&&method==='GET')return success(await listWorkstations());
     if(key==='workstations'&&method==='POST')return success(await createWorkstation(await readJson(request),user),201);
     if(path[0]==='workstations'&&path.length===2&&method==='GET')return success(await getWorkstation(path[1]));
@@ -136,7 +136,7 @@ async function handle(request: NextRequest, context: Context) {
         return new NextResponse(email?equipmentEmail(doc):equipmentDocumentHtml(doc),{headers:{'Content-Type':email?'message/rfc822':'text/html; charset=utf-8','Content-Disposition':`attachment; filename="${doc.reference.replace(/[^a-zA-Z0-9-]/g,'-')}.${email?'eml':'html'}"`,'Cache-Control':'private, no-store','Content-Security-Policy':"sandbox; default-src 'none'; style-src 'unsafe-inline'",'X-Content-Type-Options':'nosniff'}});
       }
     }
-    if(key==='employees'&&method==='GET')return success(await listEmployees(user));
+    if(key==='employees'&&method==='GET')return success(await listEmployees(user,params.get('q')));
     if(key==='employees'&&method==='POST')return success(await saveEmployee(null,await readJson(request),user),201);
     if(key==='my-equipment'&&method==='GET')return success(await service.getMyEquipment(user));
     if(path[0]==='employees'&&path.length===2){if(method==='GET')return success(await getEmployee(path[1],user));if(method==='PATCH')return success(await saveEmployee(path[1],await readJson(request),user));}

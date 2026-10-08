@@ -33,7 +33,10 @@ export interface InvoiceDocument { id: string; name: string; size: number; sha25
 export interface Delivery { id: string; invoiceId: string; invoiceNumber: string; supplierName: string; receivedAt: string; receivedBy: string; itemCount: number; quantities?:{unit:string;quantity:number}[]; notes: string | null }
 /** Lookups expose full supplier data only with invoice.view; otherwise id and name for filters. */
 export type SupplierOption = Pick<Supplier,'id'|'name'> & Partial<Supplier>;
-export interface Lookups { categories: Category[]; locations: Location[]; suppliers: SupplierOption[]; users: User[]; employees:Employee[]; invoices: Pick<Invoice, 'id'|'number'>[]; serviceNowUrl: string | null }
+export interface Lookups { categories: Category[]; locations: Location[]; suppliers: SupplierOption[]; users: User[]; serviceNowUrl: string | null }
+/** Parts of /api/lookups that can be requested alone (?only=locations,suppliers). */
+export const lookupParts = ['categories','locations','suppliers','users','settings'] as const;
+export type LookupPart = typeof lookupParts[number];
 export interface PageResult<T> { items: T[]; total: number; page: number; pageSize: number; /** Continuation for the next page in the default order (send as `after`). */ nextCursor?: string | null }
 export interface Dashboard { totalAssets: number; activeAssets: number; statusCounts: Record<AssetStatus,number>; inventoryCount: number; lowStockCount: number; lowStock: InventoryItem[]; monthDeliveries: number; monthReceivedAssets: number; recentDeliveries: Delivery[]; recentAssets: Asset[]; activity: History[] }
 export interface SearchResult { type: 'asset'|'inventory'|'invoice'|'location'|'employee'|'incident'|'config'|'document'|'user'; id: string; title: string; subtitle: string; href: string; score?:number }
