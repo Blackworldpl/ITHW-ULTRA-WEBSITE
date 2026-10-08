@@ -38,6 +38,7 @@ Pomiar: PostgreSQL 16 lokalnie, dane z `scripts/perf/synthetic-data.sql` (50 000
 | Magazyn: „kabel hdmi” / „lodz pokoj” | 137 / 242 | 22 / 45 |
 | `location_summary` (słowniki) | 108 | 16 |
 | Słowniki po zalogowaniu (JSON, 2 000 pracowników) | ok. 1 100 KB | ok. 210 KB |
+| JavaScript przy pierwszym wejściu na `/` (build CI) | 1 009 KB (298 KB gzip) | 809 KB (250 KB gzip) |
 
 Zmiany: ścieżka lokalizacji zapisana w kolumnie i utrzymywana triggerami (`location_paths` zachowuje kolumny), liczniki gałęzi liczone raz na lokalizację, indeksowana kolumna `search_text` w magazynie, indeksowane warunki kandydatów przy wyszukiwaniu urządzeń (dotychczasowy predykat nadal decyduje o wyniku), stronicowanie na wąskich wierszach z pełną projekcją tylko dla strony, kursor dla domyślnego sortowania, licznik bez złączenia kategorii, osobna pula wyszukiwarki (4 połączenia, timeout 5 s, najwyżej 3 zapytania naraz na żądanie), wspólny wynik ekranów TV na interwał odświeżania i `last_seen_at` najwyżej raz na minutę, jedno zapytanie sesji, leniwe ładowanie ekranów, słowniki bez pracowników i faktur, odświeżanie tylko zmienionych słowników.
 
@@ -52,4 +53,5 @@ Zmiany: ścieżka lokalizacji zapisana w kolumnie i utrzymywana triggerami (`loc
 
 - Dostęp do pól: odpowiedź urządzenia (i eksport) zawiera `invoiceNumber`, ceny i dostawcę dla `asset.view` niezależnie od `invoice.view`.
 - Pomiary dotyczą danych syntetycznych; przed decyzjami o dalszej optymalizacji warto sprawdzić rzeczywistą liczbę rekordów.
-- Rozmiar paczek klienta i czas startu w przeglądarce: CI zapisuje rozmiar fragmentów JS w adnotacji „bundle”; pomiar w przeglądarce (Lighthouse) nie był wykonany.
+- CI zapisuje w adnotacjach rozmiar skryptów pierwszego ładowania (`first-load`) i fragmentów JS (`bundle`). Czasu startu w przeglądarce (Lighthouse) nie mierzono.
+- Kod `main` uruchomiony w tym samym CI: 91 testów integracyjnych przechodzi na PostgreSQL 18, a test obrazu potwierdza F07 (`/brand/ith-mark.svg` zwraca `text/html`).
