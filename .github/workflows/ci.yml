@@ -71,6 +71,20 @@ jobs:
           du -sb .next/static/chunks | awk '{printf "client chunks: %.0f KB\n", $1/1024}' | tee -a ci-logs-bundle.log
           ls -S .next/static/chunks/*.js | head -n 8 | xargs -I{} sh -c 'printf "%s %s KB\n" "$(basename {})" "$(( $(stat -c%s {}) / 1024 ))"' | tee -a ci-logs-bundle.log
           echo "::notice title=bundle::$(tr '\n' ' ' < ci-logs-bundle.log)"
+      - name: First-load JavaScript
+        run: |
+          # Scripts referenced by the HTML of each route (raw and gzip), from the standalone server.
+          cp -r .next/static .next/standalone/.next/static && cp -r public .next/standalone/public
+          (cd .next/standalone && PORT=3200 HOSTNAME=127.0.0.1 APP_URL=http://localhost:3200 node server.js > ../../ci-logs-server.log 2>&1 &)
+          for i in $(seq 1 30); do curl -fsS -o /dev/null http://127.0.0.1:3200/login && break; sleep 1; done
+          for route in / /assets /login; do
+            raw=0; gz=0
+            for src in $(curl -fsS "http://127.0.0.1:3200$route" | grep -oE '/_next/static/[^"]+\.js' | sort -u); do
+              file=".next${src#/_next}"; raw=$((raw+$(stat -c%s "$file"))); gz=$((gz+$(gzip -9c "$file" | wc -c)))
+            done
+            echo "$route: $((raw/1024)) KB raw, $((gz/1024)) KB gzip" | tee -a ci-logs-firstload.log
+          done
+          echo "::notice title=first-load::$(tr '\n' ' ' < ci-logs-firstload.log)"
       - name: Report failures as annotations
         if: failure()
         run: |
