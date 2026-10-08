@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEXT_TELEMETRY_DISABLED: 1
+  NODE_VERSION: 24.21.0
+
+jobs:
+  verify:
+    name: Typecheck, tests, build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ithardware
+          # CI-only credentials for a disposable service container.
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: ithardware_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ithardware -d ithardware_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgresql://ithardware:ci-only-password@127.0.0.1:5432/ithardware_test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Dependency audit (production)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Typecheck
+        run: npm run typecheck 2>&1 | tee -a ci-logs-typecheck.log; exit ${PIPESTATUS[0]}
+      - name: Unit tests
+        run: npm test 2>&1 | tee -a ci-logs-unit.log; exit ${PIPESTATUS[0]}
+      - name: Migrate fresh PostgreSQL 18 database
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+        run: npm run db:migrate 2>&1 | tee -a ci-logs-migrate.log; exit ${PIPESTATUS[0]}
+      - name: Integration tests (PostgreSQL 18)
+        run: npm run test:integration 2>&1 | tee -a ci-logs-integration.log; exit ${PIPESTATUS[0]}
+      - name: Test totals
+        if: always()
+        run: |
+          for log in ci-logs-unit.log ci-logs-integration.log; do
+            [ -f "$log" ] || continue
+            totals=$(grep -E '^(# |ℹ )(tests|suites|pass|fail|cancelled|skipped|todo) [0-9]+' "$log" | tr '\n' ' ')
+            echo "::notice title=${log}::${totals:-no totals found}"
+          done
+      - name: Production build
+        run: npm run build 2>&1 | tee -a ci-logs-build.log; exit ${PIPESTATUS[0]}
+      - name: Bundle sizes
+        run: |
+          # Total client chunks and the largest files, to compare before/after code splitting.
+          du -sb .next/static/chunks | awk '{printf "client chunks: %.0f KB\n", $1/1024}' | tee -a ci-logs-bundle.log
+          ls -S .next/static/chunks/*.js | head -n 8 | xargs -I{} sh -c 'printf "%s %s KB\n" "$(basename {})" "$(( $(stat -c%s {}) / 1024 ))"' | tee -a ci-logs-bundle.log
+          echo "::notice title=bundle::$(tr '\n' ' ' < ci-logs-bundle.log)"
+      - name: First-load JavaScript
+        run: |
+          # Scripts referenced by the HTML of each route (raw and gzip), from the standalone server.
+          cp -r .next/static .next/standalone/.next/static && cp -r public .next/standalone/public
+          (cd .next/standalone && PORT=3200 HOSTNAME=127.0.0.1 APP_URL=http://localhost:3200 node server.js > ../../ci-logs-server.log 2>&1 &)
+          for i in $(seq 1 30); do curl -fsS -o /dev/null http://127.0.0.1:3200/login && break; sleep 1; done
+          for route in / /assets /login; do
+            raw=0; gz=0
+            for src in $(curl -fsS "http://127.0.0.1:3200$route" | grep -oE '/_next/static/[^"]+\.js' | sort -u); do
+              file=".next${src#/_next}"; raw=$((raw+$(stat -c%s "$file"))); gz=$((gz+$(gzip -9c "$file" | wc -c)))
+            done
+            echo "$route: $((raw/1024)) KB raw, $((gz/1024)) KB gzip" | tee -a ci-logs-firstload.log
+          done
+          echo "::notice title=first-load::$(tr '\n' ' ' < ci-logs-firstload.log)"
+      - name: Report failures as annotations
+        if: failure()
+        run: |
+          for log in ci-logs-*.log; do
+            [ -f "$log" ] || continue
+            # Failing assertions first, then the tail of the log.
+            body=$( { grep -nE 'not ok|Error|error|✖|AssertionError|expected|actual' "$log" | tail -n 40; echo '--- tail ---'; tail -n 60 "$log"; } | cut -c1-300)
+            body="${body//'%'/'%25'}"; body="${body//$'\r'/'%0D'}"; body="${body//$'\n'/'%0A'}"
+            echo "::error title=${log}::${body}"
+          done
+
+  package:
+    name: Production image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build runtime image
+        run: docker build --target runtime -t ithw:ci . 2>&1 | tee -a ci-logs-docker.log; exit ${PIPESTATUS[0]}
+      - name: Static assets are served from the image
+        run: |
+          docker run -d --name ithw -p 3100:3000 -e APP_URL=http://localhost:3100 ithw:ci
+          for i in $(seq 1 30); do curl -fsS -o /dev/null http://localhost:3100/login && break; sleep 2; done
+          curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:3100/login
+          type=$(curl -fsS -o /tmp/mark.svg -w '%{content_type}' http://localhost:3100/brand/ith-mark.svg)
+          echo "content-type: $type"
+          case "$type" in image/svg+xml*) ;; *) echo "::error::/brand/ith-mark.svg returned $type"; exit 1;; esac
+          grep -q '<svg' /tmp/mark.svg
+      - name: Report failures as annotations
+        if: failure()
+        run: |
+          docker logs ithw > ci-logs-container.log 2>&1 || true
+          for log in ci-logs-*.log; do
+            [ -f "$log" ] || continue
+            body=$(tail -n 60 "$log" | cut -c1-300)
+            body="${body//'%'/'%25'}"; body="${body//$'\r'/'%0D'}"; body="${body//$'\n'/'%0A'}"
+            echo "::error title=${log}::${body}"
+          done

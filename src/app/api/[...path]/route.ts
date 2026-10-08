@@ -120,7 +120,7 @@ async function handle(request: NextRequest, context: Context) {
     if(key==='admin/users/invite'&&method==='POST')return success(await access.inviteUser(await readJson(request),user),201);
     if(key==='admin/settings'&&method==='GET')return success(await product.getSystemSettings());
     if(key==='admin/settings'&&method==='PATCH')return success(await product.saveSystemSettings(await readJson(request),user));
-    if(key==='lookups' && method==='GET') return success(await service.getLookups(user));
+    if(key==='lookups' && method==='GET') return success(await service.getLookups(user,params.get('only')));
     if(key==='workstations'&&method==='GET')return success(await listWorkstations());
     if(key==='workstations'&&method==='POST')return success(await createWorkstation(await readJson(request),user),201);
     if(path[0]==='workstations'&&path.length===2&&method==='GET')return success(await getWorkstation(path[1]));
@@ -136,19 +136,19 @@ async function handle(request: NextRequest, context: Context) {
         return new NextResponse(email?equipmentEmail(doc):equipmentDocumentHtml(doc),{headers:{'Content-Type':email?'message/rfc822':'text/html; charset=utf-8','Content-Disposition':`attachment; filename="${doc.reference.replace(/[^a-zA-Z0-9-]/g,'-')}.${email?'eml':'html'}"`,'Cache-Control':'private, no-store','Content-Security-Policy':"sandbox; default-src 'none'; style-src 'unsafe-inline'",'X-Content-Type-Options':'nosniff'}});
       }
     }
-    if(key==='employees'&&method==='GET')return success(await listEmployees());
+    if(key==='employees'&&method==='GET')return success(await listEmployees(user,params.get('q')));
     if(key==='employees'&&method==='POST')return success(await saveEmployee(null,await readJson(request),user),201);
     if(key==='my-equipment'&&method==='GET')return success(await service.getMyEquipment(user));
-    if(path[0]==='employees'&&path.length===2){if(method==='GET')return success(await getEmployee(path[1]));if(method==='PATCH')return success(await saveEmployee(path[1],await readJson(request),user));}
+    if(path[0]==='employees'&&path.length===2){if(method==='GET')return success(await getEmployee(path[1],user));if(method==='PATCH')return success(await saveEmployee(path[1],await readJson(request),user));}
     if(path[0]==='employees'&&path.length===3&&path[2]==='equipment'&&method==='GET')return success(await service.getEmployeeEquipment(path[1]));
     if(path[0]==='employees'&&path.length===3&&path[2]==='account'&&method==='POST')return success(await createEmployeeAccount(path[1],await readJson(request),user),201);
     if(key==='imports/preview' && method==='POST') { auth.requireRole(user,advanced); return success(await previewImport(await readJson(request,2*1024*1024),user)); }
     if(key==='imports/commit' && method==='POST') { auth.requireRole(user,advanced); return success(await commitImport(await readJson(request,2*1024*1024),user),201); }
     if(key==='dashboard' && method==='GET') return success(await service.getDashboard(user));
-    if(key==='search' && method==='GET') return success(await searchHardware(params.get('q') || '',user));
+    if(key==='search' && method==='GET') return success(await searchHardware(params.get('q') || '',user,request.signal));
     if(key==='scan/resolve' && method==='GET') {const resolved=await service.resolveScan(params.get('code')||'');access.requirePermission(user,resolved.href.startsWith('/asset/')?'asset.view':resolved.href.startsWith('/inventory/')?'inventory.view':'location.view');return success(resolved);}
     if(key==='reports' && method==='GET') return success(await getReports(user));
-    if(key==='reports/shortages.csv' && method==='GET') { auth.requireRole(user,advanced); return new NextResponse(await exportShortages(),{headers:{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="braki-magazynowe.csv"','Cache-Control':'no-store'}}); }
+    if(key==='reports/shortages.csv' && method==='GET') { auth.requireRole(user,advanced); access.requirePermission(user,'inventory.view'); return new NextResponse(await exportShortages(user),{headers:{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="braki-magazynowe.csv"','Cache-Control':'no-store'}}); }
     if(key==='assets/export' && method==='GET') return new NextResponse(await service.exportAssets(params,user),{headers:{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="ewidencja-sprzetu.csv"','Cache-Control':'no-store'}});
     if(key==='assets' && method==='GET') return success(await service.listAssets(params));
     if(key==='assets' && method==='POST') { auth.requireRole(user,advanced); return success(await service.createAsset(await readJson(request),user),201); }

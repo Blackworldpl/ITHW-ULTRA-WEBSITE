@@ -4,7 +4,26 @@ import {requirePermission} from './permissions';
 import {query} from './db';
 
 const statusMetric:Partial<Record<TvMetric,AssetStatus>>={available:'AVAILABLE',assigned:'ASSIGNED',repair:'REPAIR',preparation:'PREPARATION',damaged:'DAMAGED',disposal:'DISPOSAL'};
-export async function tvDashboardData(config:DeviceConfig,user:User):Promise<Pick<DeviceScreenData,'statistics'|'metrics'|'incidents'|'incidentCount'>>{
+type TvData=Pick<DeviceScreenData,'statistics'|'metrics'|'incidents'|'incidentCount'>;
+// Screens refresh every few seconds and often share a configuration. Results are
+// reused for one refresh interval; only data is cached — the device session and
+// the configuring account's permissions are checked on every request (above and
+// below), so revoking a device or a permission takes effect immediately.
+const cache=new Map<string,{expires:number;value:Promise<TvData>}>();
+export async function tvDashboardData(config:DeviceConfig,user:User):Promise<TvData>{
+ const options=tvDashboard(config),showStats=config.mode==='OVERVIEW'&&config.showStats,showIncidents=config.mode==='INCIDENTS'||config.mode==='OVERVIEW'&&config.showIncidents;
+ if(config.mode==='MESSAGE')return computeTvDashboard(config,user);
+ if(showStats&&options.metrics.some(key=>key!=='openIncidents'&&key!=='criticalIncidents'))requirePermission(user,'asset.view');
+ if(showIncidents||showStats&&options.metrics.some(key=>key==='openIncidents'||key==='criticalIncidents'))requirePermission(user,'incident.view');
+ const key=JSON.stringify(config),now=Date.now(),hit=cache.get(key);
+ if(hit&&hit.expires>now)return hit.value;
+ for(const [entry,value] of cache)if(value.expires<=now||cache.size>200)cache.delete(entry);
+ const value=computeTvDashboard(config,user);
+ cache.set(key,{expires:now+Math.min(Math.max(config.refreshSeconds||5,2),60)*1000,value});
+ value.catch(()=>cache.delete(key));
+ return value;
+}
+async function computeTvDashboard(config:DeviceConfig,user:User):Promise<TvData>{
  const options=tvDashboard(config),showStats=config.mode==='OVERVIEW'&&config.showStats,showIncidents=config.mode==='INCIDENTS'||config.mode==='OVERVIEW'&&config.showIncidents;
  const statistics:NonNullable<DeviceScreenData['statistics']>={statuses:{}},metrics:DeviceScreenData['metrics']=[],incidents:DeviceScreenData['incidents']=[];
  if(config.mode==='MESSAGE')return {statistics:null,metrics,incidents,incidentCount:0};

@@ -44,7 +44,9 @@ export async function getReports(user?:User):Promise<Reports> {
   return {...summary.rows[0],byCategory:categories.rows,byStatus:statuses.rows,byLocation:locations.rows,warranty:warranty.rows[0],values:values.rows,monthly:monthly.rows,bySupplier:suppliers.rows,topWithdrawals:withdrawals.rows,shortages:shortages.rows};
 }
 
-export async function exportShortages():Promise<string> {
+export async function exportShortages(user:User):Promise<string> {
+  // Same rule as the on-screen report: stock data requires inventory.view (F03).
+  if(!hasPermission(user,'inventory.view'))throw new AppError(403,'Brak uprawnienia: inventory.view.');
   const rows=await query<Reports['shortages'][number]>(shortageSql+' LIMIT 10001');
   if(rows.rows.length>10000) throw new AppError(413,'Lista obejmuje ponad 10 000 produktów. Skorzystaj z rejestru magazynowego.');
   return csv([['SKU','Produkt','Stan','Minimum','Brakuje do minimum','Jednostka','Lokalizacja'],...rows.rows.map(r=>[r.sku,r.name,r.stock,r.minimum,r.missing,r.unit,r.location])]);

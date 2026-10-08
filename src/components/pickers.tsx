@@ -1,8 +1,9 @@
 'use client';
 
-import {useEffect,useId,useRef,useState} from 'react';
+import {useCallback,useEffect,useId,useRef,useState} from 'react';
 import {Check,ChevronDown,ChevronRight,Folder,Search,X} from 'lucide-react';
-import type {Invoice,PageResult} from '@/shared/types';
+import type {Employee,Invoice,PageResult} from '@/shared/types';
+import {hasPermission} from '@/shared/permissions';
 import {useApp} from './context';
 import {api} from './ui';
 
@@ -105,11 +106,29 @@ export function LocationPicker({value,onChange,label='Lokalizacja',required=fals
   const selected=locations.find(location=>location.id===value);
   return <SearchSelect label={label} value={value} onSelect={onChange} required={required} disabled={disabled||!lookups} selectedLabel={selected?.path} options={locations.filter(location=>!excluded?.has(location.id)).map(location=>({id:location.id,label:location.name,detail:location.path===location.name?undefined:location.path,search:location.path,parentId:location.parentId}))} tree placeholder={lookups?emptyLabel:'Wczytywanie lokalizacji…'} emptyLabel={emptyLabel}/>;
 }
+// Employees and invoices are no longer preloaded in lookups: the pickers search
+// them as the user types and fetch the label of a value set from a URL or record.
+function useRecordLabel(id:string,known:string|undefined,load:(id:string,signal:AbortSignal)=>Promise<string>){
+  const [loaded,setLoaded]=useState<{id:string;label:string}|null>(null);
+  useEffect(()=>{
+    if(!id||known)return;const controller=new AbortController();
+    load(id,controller.signal).then(label=>setLoaded({id,label})).catch(()=>{/* The raw value stays visible. */});
+    return()=>controller.abort();
+  },[id,known,load]);
+  return known??(loaded?.id===id?loaded.label:undefined);
+}
+const employeeLabel=async(id:string,signal:AbortSignal)=>(await api<Employee>(`/api/employees/${id}`,{signal})).name;
 export function EmployeePicker({employeeId,owner,onChange,label='Pracownik / właściciel',required=false,excludeId,disabled=false}:{employeeId:string;owner:string;onChange:(id:string,name:string)=>void;label?:string;required?:boolean;excludeId?:string;disabled?:boolean}){
-  const {lookups}=useApp();const employees=(lookups?.employees??[]).filter(employee=>(employee.active||employee.id===employeeId)&&employee.id!==excludeId);
-  return <SearchSelect label={label} value={employeeId} freeText={owner} selectedLabel={employees.find(employee=>employee.id===employeeId)?.name??owner} required={required} disabled={disabled||!lookups} options={employees.map(employee=>({id:employee.id,label:employee.name,detail:[employee.employeeNumber,employee.department,employee.email].filter(Boolean).join(' · ')}))} onSelect={id=>onChange(id,employees.find(employee=>employee.id===id)?.name??owner)} onTextChange={text=>onChange('',text)} placeholder={lookups?'Wpisz imię, nazwisko lub numer pracownika…':'Wczytywanie pracowników…'}/>;
+  const {user}=useApp(),canSearch=hasPermission(user,'employee.view');
+  const search=useCallback(async(text:string,signal:AbortSignal)=>(await api<Employee[]>(`/api/employees?q=${encodeURIComponent(text)}`,{signal}))
+    .filter(employee=>(employee.active||employee.id===employeeId)&&employee.id!==excludeId)
+    .map(employee=>({id:employee.id,label:employee.name,detail:[employee.employeeNumber,employee.department,employee.email].filter(Boolean).join(' · ')})),[employeeId,excludeId]);
+  const name=useRecordLabel(canSearch?employeeId:'',owner||undefined,employeeLabel);
+  return <SearchSelect label={label} value={employeeId} freeText={owner} selectedLabel={name??owner} required={required} disabled={disabled} options={[]} search={canSearch?search:undefined} onSelect={(id,choice)=>onChange(id,choice?.label??owner)} onTextChange={text=>onChange('',text)} placeholder="Wpisz imię, nazwisko lub numer pracownika…"/>;
 }
 async function searchInvoices(text:string,signal:AbortSignal){const result=await api<PageResult<Invoice>>(`/api/invoices?q=${encodeURIComponent(text)}&pageSize=30`,{signal});return result.items.map(invoice=>({id:invoice.id,label:invoice.number,detail:invoice.supplierName}));}
+const invoiceLabel=async(id:string,signal:AbortSignal)=>(await api<Invoice>(`/api/invoices/${id}`,{signal})).number;
 export function InvoicePicker({value,onChange,label='Faktura',number,emptyLabel='Wpisz numer faktury…'}:{value:string;onChange:(id:string)=>void;label?:string;number?:string|null;emptyLabel?:string}){
-  const {lookups}=useApp();return <SearchSelect label={label} value={value} onSelect={onChange} selectedLabel={number??undefined} options={(lookups?.invoices??[]).map(invoice=>({id:invoice.id,label:invoice.number}))} search={searchInvoices} placeholder={emptyLabel}/>;
+  const shown=useRecordLabel(value,number??undefined,invoiceLabel);
+  return <SearchSelect label={label} value={value} onSelect={onChange} selectedLabel={shown} options={[]} search={searchInvoices} placeholder={emptyLabel}/>;
 }

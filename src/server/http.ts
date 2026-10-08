@@ -33,6 +33,7 @@ export function errorResponse(error: unknown) {
     '22P02':[400,'Nieprawidłowy identyfikator lub format danych.'],
     '40001':[409,'Dane zmieniły się podczas zapisu. Ponów operację.'],
     '40P01':[409,'Równoczesna operacja zablokowała zapis. Ponów operację.'],
+    'PASSWORD_BUSY':[503,'Serwer jest chwilowo zajęty. Spróbuj ponownie za chwilę.'],
     'ECONNREFUSED':[503,'Baza PostgreSQL jest niedostępna. Uruchom bazę i wykonaj migracje.'],
     'ENOTFOUND':[503,'Nie można połączyć się z bazą PostgreSQL.'],
     '42P01':[503,'Wykonaj migracje bazy danych przed uruchomieniem aplikacji.']

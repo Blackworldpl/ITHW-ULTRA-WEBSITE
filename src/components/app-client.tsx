@@ -4,28 +4,36 @@ import type {Permission} from '@/shared/permissions';
 import {hasPermission} from '@/shared/permissions';
 import {AppProvider,useApp} from './context';
 import {Shell} from './shell';
-import {DevicesScreen} from './devices';
-import {DeviceScreen} from './device-screen';
+import {lazy,Suspense} from 'react';
 import {DashboardScreen} from './dashboard';
 import {AssetListScreen,AssetDetailScreen} from './assets';
 import {InventoryListScreen,InventoryDetailScreen} from './inventory';
-import {DeliveryScreen,InvoiceScreen} from './operations';
-import {AdminScreen} from './admin';
-import {ScanScreen} from './scanner';
-import {InventoryImportScreen} from './inventory-import';
-import {ReportsScreen} from './reports';
-import {EmployeesScreen} from './employees';
-import {WorkstationsScreen} from './workstations';
-import {ConfigurationsScreen,DocumentsScreen} from './library';
-import {StocktakesScreen} from './stocktakes';
-import {IncidentsScreen,ServiceNowScreen} from './incidents';
-import {LocationsScreen} from './locations-screen';
-import {PermissionsScreen,SettingsScreen} from './access-settings';
-import {EmptyState,ErrorMessage} from './ui';
+import {EmptyState,ErrorMessage,Loading} from './ui';
+// The dashboard and the asset and warehouse screens stay in the main bundle; every
+// other screen is loaded when it is opened, so the first visit does not download
+// administration, reports, TV and terminal code.
+const DevicesScreen=lazy(()=>import('./devices').then(m=>({default:m.DevicesScreen})));
+const DeviceScreen=lazy(()=>import('./device-screen').then(m=>({default:m.DeviceScreen})));
+const DeliveryScreen=lazy(()=>import('./operations').then(m=>({default:m.DeliveryScreen})));
+const InvoiceScreen=lazy(()=>import('./operations').then(m=>({default:m.InvoiceScreen})));
+const AdminScreen=lazy(()=>import('./admin').then(m=>({default:m.AdminScreen})));
+const ScanScreen=lazy(()=>import('./scanner').then(m=>({default:m.ScanScreen})));
+const InventoryImportScreen=lazy(()=>import('./inventory-import').then(m=>({default:m.InventoryImportScreen})));
+const ReportsScreen=lazy(()=>import('./reports').then(m=>({default:m.ReportsScreen})));
+const EmployeesScreen=lazy(()=>import('./employees').then(m=>({default:m.EmployeesScreen})));
+const WorkstationsScreen=lazy(()=>import('./workstations').then(m=>({default:m.WorkstationsScreen})));
+const ConfigurationsScreen=lazy(()=>import('./library').then(m=>({default:m.ConfigurationsScreen})));
+const DocumentsScreen=lazy(()=>import('./library').then(m=>({default:m.DocumentsScreen})));
+const StocktakesScreen=lazy(()=>import('./stocktakes').then(m=>({default:m.StocktakesScreen})));
+const IncidentsScreen=lazy(()=>import('./incidents').then(m=>({default:m.IncidentsScreen})));
+const ServiceNowScreen=lazy(()=>import('./incidents').then(m=>({default:m.ServiceNowScreen})));
+const LocationsScreen=lazy(()=>import('./locations-screen').then(m=>({default:m.LocationsScreen})));
+const PermissionsScreen=lazy(()=>import('./access-settings').then(m=>({default:m.PermissionsScreen})));
+const SettingsScreen=lazy(()=>import('./access-settings').then(m=>({default:m.SettingsScreen})));
 const screenPermissions:Record<string,Permission>={devices:'device.view',assets:'asset.view',asset:'asset.view',inventory:'inventory.view',deliveries:'invoice.view',invoices:'invoice.view',invoice:'invoice.view',scan:'rfid.scan',employees:'employee.view',workstations:'location.view','my-equipment':'employee.view',locations:'location.manage',configs:'config.view',documents:'document.view',stocktakes:'inventory.run',incidents:'incident.view',servicenow:'incident.view',users:'user.view',permissions:'role.manage',audit:'audit.view',settings:'settings.manage',admin:'settings.manage',reports:'asset.view',import:'import.run'};
 function AccessGate({section,children}:{section?:string;children:React.ReactNode}){const {user}=useApp();return section&&screenPermissions[section]&&!hasPermission(user,screenPermissions[section])?<ErrorMessage message="Twoje konto nie ma uprawnienia do tej części systemu."/>:children;}
 export function AppClient({segments=[]}:{segments?:string[]}){
- const [section,id]=segments;if(section==='device'&&id&&segments.length===2)return <DeviceScreen id={id}/>;let screen:React.ReactNode;
+ const [section,id]=segments;if(section==='device'&&id&&segments.length===2)return <Suspense fallback={<Loading/>}><DeviceScreen id={id}/></Suspense>;let screen:React.ReactNode;
  if(!section)screen=<DashboardScreen/>;
  else if(segments.length>2)screen=<Missing/>;
  else if(section==='devices'&&!id)screen=<DevicesScreen/>;
@@ -52,6 +60,6 @@ export function AppClient({segments=[]}:{segments?:string[]}){
  else if(section==='reports'&&!id)screen=<ReportsScreen/>;
  else if(section==='import'&&!id)screen=<InventoryImportScreen/>;
  else screen=<Missing/>;
- return <AppProvider><Shell><AccessGate section={section}>{screen}</AccessGate></Shell></AppProvider>;
+ return <AppProvider><Shell><AccessGate section={section}><Suspense fallback={<Loading/>}>{screen}</Suspense></AccessGate></Shell></AppProvider>;
 }
 function Missing(){return <section className="panel"><EmptyState title="Nie znaleziono strony" description="Sprawdź adres lub otwórz przegląd operacyjny." action={<Link href="/" className="button">Przegląd operacyjny</Link>}/></section>;}

@@ -116,7 +116,9 @@ export async function deviceScreen(id:string,request:NextRequest):Promise<Device
  const tv=session.kind==='TV'?await tvDashboardData(config,actor):{statistics:null,metrics:[],incidents:[],incidentCount:0};
  let inventory:DeviceScreenData['inventory']=null;
  if(session.kind==='SCANNER'&&config.mode==='INVENTORY'&&config.stocktakeId){requirePermission(actor,'inventory.run');requirePermission(actor,'asset.view');inventory=terminalInventory(await stocktakeSummary(config.stocktakeId),config);}
- await query('UPDATE managed_devices SET last_seen_at=now() WHERE id=$1',[id]);
+ // Presence is recorded at most once a minute, not on every refresh (a write each 5 s per screen).
+ const lastSeen=session.lastSeenAt?new Date(session.lastSeenAt).getTime():0;
+ if(!(Date.now()-lastSeen<60_000))await query("UPDATE managed_devices SET last_seen_at=now() WHERE id=$1 AND (last_seen_at IS NULL OR last_seen_at<now()-interval '1 minute')",[id]);
  return clean({id:session.id,name:session.name,kind:session.kind,version:session.version,config,csrfToken:session.csrfToken,updatedAt:new Date().toISOString(),...tv,inventory});
 }
 export async function deviceScan(id:string,request:NextRequest,body:unknown):Promise<DeviceReading>{

@@ -2,13 +2,14 @@ import {z} from 'zod';
 import type {SerialMatch,SerialPreview} from '@/shared/purchase';
 import { createHash } from 'node:crypto';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
-import type { Asset, AssetStatus, Dashboard, Delivery, History, InventoryItem, Invoice, InvoiceDetail, InvoiceLine, Location, Lookups, Named, PageResult, SearchResult, User } from '@/shared/types';
+import type { Asset, AssetStatus, Dashboard, Delivery, History, InventoryItem, Invoice, InvoiceDetail, InvoiceLine, Location, Lookups, Named, PageResult, User } from '@/shared/types';
 import { statuses, statusLabels } from '@/shared/types';
 import { csv } from './csv';
 import {listCategories,listSuppliers,listEmployees,getEmployee,saveDictionary,supplierProjection} from './directory';
 import {categoryFieldError} from '@/shared/category-fields';
-import type {Category,Employee,Supplier} from '@/shared/types';
+import type {Category,Employee,Supplier,SupplierOption} from '@/shared/types';
 import { pool, query, transaction } from './db';
+import {lookupParts,type LookupPart} from '@/shared/types';
 import { AppError } from './errors';
 import { assetActionSchema, assetIdSchema, assetPatchSchema, assetSchema, categorySchema, dateSchema, deliverySchema, inventoryPatchSchema, inventorySchema, invoiceSchema, invoicePatchSchema, locationSchema, movementSchema, parse, slugSchema, stockCorrectionSchema, supplierSchema, uuidSchema, quantitySchema } from './validation';
 import {invoiceTotal,purchaseTotal,moneyCents} from '@/shared/money';
@@ -45,6 +46,14 @@ export const assetProjection = `a.id,a.asset_id AS "assetId",a.name,a.category_i
  a.rfid_tag AS "rfidTag",a.notes,a.custom_fields AS "customFields",a.created_at AS "createdAt",a.updated_at AS "updatedAt",a.version`;
 export const assetFrom = `FROM assets a JOIN asset_categories c ON c.id=a.category_id
  LEFT JOIN location_paths l ON l.id=a.location_id LEFT JOIN invoices i ON i.id=a.invoice_id LEFT JOIN suppliers s ON s.id=i.supplier_id LEFT JOIN employees emp ON emp.id=a.employee_id`;
+// category_id is required and references a category, so that join never changes
+// the count; the remaining LEFT JOINs on unique keys are dropped by the planner
+// unless a filter uses them.
+const assetCountFrom = `FROM assets a
+ LEFT JOIN location_paths l ON l.id=a.location_id LEFT JOIN invoices i ON i.id=a.invoice_id LEFT JOIN suppliers s ON s.id=i.supplier_id LEFT JOIN employees emp ON emp.id=a.employee_id`;
+const assetDefaultOrder = 'a.created_at DESC,a.id';
+// Microsecond UTC timestamp and id: independent of the session's DateStyle/TimeZone.
+const assetCursor = `(to_char(a.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')||'|'||a.id::text)`;
 const invoiceProjection = `i.id,i.number,i.supplier_id AS "supplierId",s.name AS "supplierName",i.date::text AS date,i.amount::text AS amount,
  i.currency,i.order_number AS "orderNumber",u.name AS "receivedBy",i.created_at AS "createdAt",i.version,i.notes`;
 const invoiceFrom = 'FROM invoices i JOIN suppliers s ON s.id=i.supplier_id JOIN users u ON u.id=i.received_by';
@@ -54,8 +63,28 @@ const deliveryFrom = 'FROM deliveries d JOIN invoices i ON i.id=d.invoice_id JOI
 const auditProjection = `e.id,e.action,COALESCE(u.name,'System') AS "actorName",e.created_at AS "createdAt",e.description,e.before_data AS before,e.after_data AS after`;
 const assetSearchExpression = `(coalesce(a.asset_id,'') || ' ' || coalesce(a.name,'') || ' ' || coalesce(a.serial_number,'') || ' ' ||
  coalesce(a.model,'') || ' ' || coalesce(a.manufacturer,'') || ' ' || coalesce(a.hostname,'') || ' ' || coalesce(emp.name,a.owner,'') || ' ' || coalesce(a.rfid_tag,'') || ' ' || coalesce(a.sku,'') || ' ' || coalesce(a.product_code,''))`;
-const inventorySearchExpression = `(n.name || ' ' || coalesce(n.sku,'') || ' ' || coalesce(n.product_code,'') || ' ' || n.slug || ' ' || n.category)`;
 const escapeLike = (value: string) => value.replace(/[\\%_]/g, character => `\\${character}`);
+// Same expression as assets_extended_search_idx (migration 010), so it is indexed.
+const indexedAssetText = `(coalesce(a.asset_id,'')||' '||coalesce(a.name,'')||' '||coalesce(a.serial_number,'')||' '||coalesce(a.model,'')||' '||coalesce(a.manufacturer,'')||' '||coalesce(a.hostname,'')||' '||coalesce(a.owner,'')||' '||coalesce(a.rfid_tag,'')||' '||coalesce(a.sku,'')||' '||coalesce(a.product_code,'')||' '||coalesce(a.fixed_asset_number,''))`;
+// Indexed conditions that every asset matching the list search satisfies. The
+// original predicate is still applied, so results and order do not change; the
+// planner can now pick indexes instead of computing the text for every row.
+// A term without a space can only match inside one field: the indexed text covers
+// every field except the current employee name, which has its own condition.
+// A term with a space may span fields; it differs from the indexed text only where
+// the stored owner differs from the current employee name (a renamed employee),
+// so those few assets are always included.
+function assetCandidates(p: string, term: string) {
+  const arms = [
+    `${indexedAssetText} ILIKE ${p}`,
+    `coalesce(a.mac_address::text,'') ILIKE ${p}`,
+    `coalesce(host(a.ip_address),'') ILIKE ${p}`,
+    `a.employee_id = ANY(ARRAY(SELECT id FROM employees WHERE name ILIKE ${p}))`,
+    `a.invoice_id = ANY(ARRAY(SELECT id FROM invoices WHERE number ILIKE ${p}))`,
+  ];
+  if (term.includes(' ')) arms.push(`a.id = ANY(ARRAY(SELECT ca.id FROM assets ca JOIN employees ce ON ce.id=ca.employee_id WHERE ca.owner IS DISTINCT FROM ce.name))`);
+  return `(${arms.join(' OR ')})`;
+}
 
 async function assetById(assetId: string, executor: Executor = pool): Promise<Asset> {
   const result = await executor.query<Asset>(`SELECT ${assetProjection} ${assetFrom} WHERE a.asset_id=$1`, [assetId]);
@@ -122,14 +151,34 @@ function paging(params: URLSearchParams) {
   }
   return { page,pageSize,offset:(page-1)*pageSize };
 }
-async function paginated<T extends QueryResultRow>(projection: string, from: string, filters: string[], values: unknown[], order: string, params: URLSearchParams): Promise<PageResult<T>> {
-  const {page,pageSize,offset} = paging(params);
+type PageOptions = {
+  /** Row identity used to page over narrow rows before building the projection. */
+  key: string;
+  /** Count without joins that cannot change the row count (defaults to `from`). */
+  countFrom?: string;
+  /** SQL for an opaque position of a row; the last row's value is returned as nextCursor. */
+  cursor?: string;
+  /** Keyset continuation (rows after a cursor): replaces OFFSET, not used for the count. */
+  after?: {filter: string; values: unknown[]};
+};
+async function paginated<T extends QueryResultRow>(projection: string, from: string, filters: string[], values: unknown[], order: string, params: URLSearchParams, options: PageOptions): Promise<PageResult<T>> {
+  const {page,pageSize} = paging(params);
+  const offset = options.after ? 0 : (page-1)*pageSize;
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  const rowFilters = options.after ? [...filters,options.after.filter] : filters, rowValues = options.after ? [...values,...options.after.values] : values;
+  const rowWhere = rowFilters.length ? `WHERE ${rowFilters.join(' AND ')}` : '';
+  // Sort and page narrow rows first, then build the full projection (joins and
+  // correlated subqueries) for this page only instead of for every matching row.
+  const pageIds = `SELECT ${options.key} ${from} ${rowWhere} ORDER BY ${order} LIMIT $${rowValues.length+1} OFFSET $${rowValues.length+2}`;
+  const cursorColumn = options.cursor ? `,${options.cursor} AS "pageCursor"` : '';
   const [rows,total] = await Promise.all([
-    query<T>(`SELECT ${projection} ${from} ${where} ORDER BY ${order} LIMIT $${values.length+1} OFFSET $${values.length+2}`, [...values,pageSize,offset]),
-    query<{ total: number }>(`SELECT count(*)::integer AS total ${from} ${where}`, values),
+    query<T & {pageCursor?: string}>(`SELECT ${projection}${cursorColumn} ${from} WHERE ${options.key} IN (${pageIds}) ORDER BY ${order}`, [...rowValues,pageSize,offset]),
+    query<{ total: number }>(`SELECT count(*)::integer AS total ${options.countFrom ?? from} ${where}`, values),
   ]);
-  return clean({items:rows.rows,total:total.rows[0].total,page,pageSize});
+  const items = rows.rows;
+  const nextCursor = options.cursor && items.length === pageSize ? items[items.length-1].pageCursor ?? null : null;
+  for (const item of items) delete item.pageCursor;
+  return {items,total:total.rows[0].total,page,pageSize,...(options.cursor ? {nextCursor} : {})};
 }
 function searchTerm(params: URLSearchParams): string | null {
   const term = params.get('q')?.trim();
@@ -138,18 +187,25 @@ function searchTerm(params: URLSearchParams): string | null {
   return `%${escapeLike(term)}%`;
 }
 
-export async function getLookups(user: User): Promise<Lookups> {
-  const [categories,locations,suppliers,users,invoices,employees] = await Promise.all([
-    listCategories(),
-    hasPermission(user,'location.view') ? query<Location>('SELECT id,name,path,kind,parent_id AS "parentId",version,asset_count AS "assetCount",child_count AS "childCount" FROM location_summary ORDER BY path') : Promise.resolve({rows:[] as Location[]}),
-    listSuppliers(),
-    user.role === 'ADMIN' ? query<User>('SELECT id,name,email,role,active FROM users ORDER BY name') : Promise.resolve({rows:[] as User[]}),
-    hasPermission(user,'invoice.view') ? query<Pick<Invoice,'id'|'number'>>('SELECT id,number FROM invoices ORDER BY created_at DESC LIMIT 500') : Promise.resolve({rows:[]}),
-    hasPermission(user,'employee.view') ? listEmployees() : Promise.resolve([]),
+// Shared dictionaries loaded at start and after edits. Employees and invoices are
+// no longer included (they were most of the payload): the pickers search them on
+// demand. `only` returns just the parts a screen changed.
+export async function getLookups(user: User, only?: string | null): Promise<Partial<Lookups>> {
+  const parts = new Set<LookupPart>(only ? only.split(',').map(part => parse(z.enum(lookupParts), part.trim())) : lookupParts);
+  const result: Partial<Lookups> = {};
+  await Promise.all([
+    parts.has('categories') && listCategories().then(rows => { result.categories = rows; }),
+    parts.has('locations') && (hasPermission(user,'location.view') ? query<Location>('SELECT id,name,path,kind,parent_id AS "parentId",version,asset_count AS "assetCount",child_count AS "childCount" FROM location_summary ORDER BY path').then(r => r.rows) : Promise.resolve([] as Location[])).then(rows => {
+      if(!hasPermission(user,'asset.view')) for(const l of rows) delete l.assetCount;
+      result.locations = rows;
+    }),
+    // Bank account, contacts and notes require purchase access (F02). Asset viewers
+    // only need id and name for the supplier filter; names are already on assets.
+    parts.has('suppliers') && (hasPermission(user,'invoice.view') ? listSuppliers() : hasPermission(user,'asset.view') ? query<SupplierOption>('SELECT id,name FROM suppliers ORDER BY name').then(r=>r.rows) : Promise.resolve([] as SupplierOption[])).then(rows => { result.suppliers = rows; }),
+    parts.has('users') && (user.role === 'ADMIN' ? query<User>('SELECT id,name,email,role,active FROM users ORDER BY name').then(r => r.rows) : Promise.resolve([] as User[])).then(rows => { result.users = rows; }),
+    parts.has('settings') && import('./product-operations').then(module => module.getSystemSettings()).then(settings => { result.serviceNowUrl = settings.serviceNowUrl; }),
   ]);
-  const {serviceNowUrl} = await (await import('./product-operations')).getSystemSettings();
-  if(!hasPermission(user,'asset.view')) for(const l of locations.rows) delete l.assetCount;
-  return clean({categories,locations:locations.rows,suppliers,users:users.rows,invoices:invoices.rows,employees,serviceNowUrl});
+  return result;
 }
 
 export async function getDashboard(user: User): Promise<Dashboard> {
@@ -177,26 +233,6 @@ export async function getDashboard(user: User): Promise<Dashboard> {
     recentDeliveries:recentDeliveries.rows,recentAssets:recentAssets.rows,activity:activity.rows});
 }
 
-export async function search(q: string): Promise<SearchResult[]> {
-  const term = q.trim();
-  if (term.length < 2) return [];
-  if (term.length > 200) throw new AppError(400, 'Wyszukiwanie może mieć najwyżej 200 znaków.');
-  const pattern = `%${escapeLike(term)}%`;
-  const [assets,inventory,invoices,locations] = await Promise.all([
-    query<Asset>(`SELECT ${assetProjection} ${assetFrom} WHERE ${assetSearchExpression} ILIKE $1
-      OR a.mac_address::text ILIKE $1 OR host(a.ip_address) ILIKE $1 OR i.number ILIKE $1 OR a.fixed_asset_number ILIKE $1 ORDER BY (a.asset_id=$2) DESC,a.updated_at DESC LIMIT 8`, [pattern,term.toUpperCase()]),
-    query<InventoryItem>(`SELECT ${inventoryProjection} ${inventoryFrom} WHERE ${inventorySearchExpression} ILIKE $1 ORDER BY n.name LIMIT 5`, [pattern]),
-    query<Invoice>(`SELECT ${invoiceProjection} ${invoiceFrom} WHERE i.number ILIKE $1 OR s.name ILIKE $1 ORDER BY i.date DESC LIMIT 4`, [pattern]),
-    query<Location>('SELECT id,name,path FROM location_paths WHERE path ILIKE $1 ORDER BY path LIMIT 4',[pattern]),
-  ]);
-  return [
-    ...assets.rows.map(a => ({type:'asset' as const,id:a.assetId,title:a.name,subtitle:`${a.assetId} · ${a.serialNumber ?? a.categoryName}`,href:`/asset/${a.assetId}`})),
-    ...inventory.rows.map(n => ({type:'inventory' as const,id:n.slug,title:n.name,subtitle:`${n.sku??n.productCode??n.slug} · ${n.stock} ${n.unit}`,href:`/inventory/${n.slug}`})),
-    ...invoices.rows.map(i => ({type:'invoice' as const,id:i.id,title:i.number,subtitle:i.supplierName,href:`/invoice/${i.id}`})),
-    ...locations.rows.map(l=>({type:'location' as const,id:l.id,title:l.name,subtitle:l.path,href:`/assets?locationId=${l.id}&includeChildren=true`})),
-  ];
-}
-
 function assetFilters(params: URLSearchParams) {
   const filters: string[] = [], values: unknown[] = [];
   const add = (expression: string, value: unknown) => { values.push(value); filters.push(expression.replace('?', `$${values.length}`)); };
@@ -204,6 +240,7 @@ function assetFilters(params: URLSearchParams) {
   if (term) {
     values.push(term);
     const p = `$${values.length}`;
+    filters.push(assetCandidates(p,params.get('q')!.trim()));
     filters.push(`(${assetSearchExpression} ILIKE ${p} OR a.mac_address::text ILIKE ${p} OR host(a.ip_address) ILIKE ${p} OR i.number ILIKE ${p} OR a.fixed_asset_number ILIKE ${p})`);
   }
   for (const [key,column] of [['categoryId','a.category_id'],['invoiceId','a.invoice_id'],['supplierId','i.supplier_id']] as const) {
@@ -243,14 +280,25 @@ function assetFilters(params: URLSearchParams) {
   else if (warranty === 'valid') filters.push("a.warranty_until>(now() AT TIME ZONE 'Europe/Warsaw')::date+30");
   else if (warranty === 'none') filters.push('a.warranty_until IS NULL');
   else if (warranty) throw new AppError(400,'Nieprawidłowy filtr gwarancji.');
-  const sorts:Record<string,string>={newest:'a.created_at DESC,a.id',oldest:'a.created_at,a.id',name:'a.name,a.id','name-desc':'a.name DESC,a.id',assetId:'a.asset_id,a.id',warranty:'a.warranty_until ASC NULLS LAST,a.id',serial:'a.serial_number ASC NULLS LAST,a.id','serial-desc':'a.serial_number DESC NULLS LAST,a.id',location:'l.path ASC NULLS LAST,a.id','location-desc':'l.path DESC NULLS LAST,a.id',owner:'COALESCE(emp.name,a.owner) ASC NULLS LAST,a.id','owner-desc':'COALESCE(emp.name,a.owner) DESC NULLS LAST,a.id',updated:'a.updated_at DESC,a.id'};
+  const sorts:Record<string,string>={newest:assetDefaultOrder,oldest:'a.created_at,a.id',name:'a.name,a.id','name-desc':'a.name DESC,a.id',assetId:'a.asset_id,a.id',warranty:'a.warranty_until ASC NULLS LAST,a.id',serial:'a.serial_number ASC NULLS LAST,a.id','serial-desc':'a.serial_number DESC NULLS LAST,a.id',location:'l.path ASC NULLS LAST,a.id','location-desc':'l.path DESC NULLS LAST,a.id',owner:'COALESCE(emp.name,a.owner) ASC NULLS LAST,a.id','owner-desc':'COALESCE(emp.name,a.owner) DESC NULLS LAST,a.id',updated:'a.updated_at DESC,a.id'};
   const sort=params.get('sort')||'newest';
   if(!Object.hasOwn(sorts,sort)) throw new AppError(400,'Nieprawidłowe sortowanie.');
   return {filters,values,order:sorts[sort]};
 }
 export async function listAssets(params: URLSearchParams): Promise<PageResult<Asset>> {
   const {filters,values,order}=assetFilters(params);
-  return paginated<Asset>(assetProjection,assetFrom,filters,values,order,params);
+  // Default order: the client continues with the cursor of the previous page, so a
+  // deep page reads from the index instead of skipping every earlier row (OFFSET).
+  const defaultOrder = order === assetDefaultOrder, cursor = params.get('after');
+  let after: PageOptions['after'];
+  if (cursor && defaultOrder) {
+    const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z)\|([0-9a-f-]{36})$/.exec(cursor);
+    if (!match) throw new AppError(400,'Nieprawidłowy kursor strony.');
+    const at = `$${values.length+1}::timestamptz`, id = `$${values.length+2}::uuid`;
+    // created_at DESC, id ASC: the first condition lets the index range-scan.
+    after = {filter:`a.created_at<=${at} AND (a.created_at<${at} OR a.id>${id})`,values:[match[1],parse(uuidSchema,match[2])]};
+  }
+  return paginated<Asset>(assetProjection,assetFrom,filters,values,order,params,{key:'a.id',countFrom:assetCountFrom,...(defaultOrder?{cursor:assetCursor,after}:{})});
 }
 export async function exportAssets(params:URLSearchParams,user:User):Promise<string> {
   requireRole(user,advancedRoles);
@@ -284,7 +332,7 @@ const assetColumns: Record<string,string> = {
   employeeId:'employee_id',sku:'sku',productCode:'product_code',
 };
 async function resolveEmployee(client:PoolClient,id:string){const row=(await client.query<{name:string;active:boolean}>('SELECT name,active FROM employees WHERE id=$1 FOR SHARE',[id])).rows[0];if(!row?.active)throw new AppError(400,'Wybierz aktywnego pracownika.');return row.name;}
-async function validateCategory(client:PoolClient,categoryId:string,values:Record<string,string>){const row=(await client.query<Category>('SELECT field_definitions AS "fieldDefinitions" FROM asset_categories WHERE id=$1 FOR SHARE',[categoryId])).rows[0];if(!row)throw new AppError(400,'Nie znaleziono kategorii.');const error=categoryFieldError(row.fieldDefinitions,values);if(error)throw new AppError(400,error);}
+async function validateCategory(client:PoolClient,categoryId:string,values:Record<string,string>,context=''){const row=(await client.query<Category>('SELECT field_definitions AS "fieldDefinitions" FROM asset_categories WHERE id=$1 FOR SHARE',[categoryId])).rows[0];if(!row)throw new AppError(400,'Nie znaleziono kategorii.');const error=categoryFieldError(row.fieldDefinitions,values??{});if(error)throw new AppError(400,context+error);}
 function checkAssetRules(asset: { status: string; owner?: string | null; isFixedAsset: boolean; fixedAssetNumber?: string | null; purchasedAt?: string | null; warrantyUntil?: string | null }) {
   if (asset.status === 'ASSIGNED' && !asset.owner) throw new AppError(400,'Urządzenie wydane musi mieć użytkownika.');
   if (asset.isFixedAsset && !asset.fixedAssetNumber) throw new AppError(400,'Podaj numer środka trwałego.');
@@ -336,7 +384,10 @@ async function applyAssetUpdate(client:PoolClient,assetId:string,input:ReturnTyp
     if(input.rfidTag!==undefined&&input.rfidTag!==before.rfidTag)requirePermission(user,'rfid.edit');
     if(input.invoiceId!==undefined&&input.invoiceId!==before.invoiceId)requirePermission(user,'invoice.edit');
     }
-    if(input.categoryId!==undefined||input.customFields!==undefined)await validateCategory(client,merged.categoryId,merged.customFields);
+    // Equipment received from a purchase may lack category fields (it starts in
+    // PREPARATION); issuing it to a person requires the required fields (F05).
+    const issuing=merged.status==='ASSIGNED'&&(before.status!=='ASSIGNED'||merged.owner!==before.owner||merged.employeeId!==before.employeeId);
+    if(issuing||input.categoryId!==undefined||input.customFields!==undefined)await validateCategory(client,merged.categoryId,merged.customFields,issuing?'Przed wydaniem uzupełnij dane urządzenia. ':'');
     checkAssetRules(merged);
     const entries = Object.entries(input).filter(([key,value]) => key !== 'version' && value !== undefined);
     const values: unknown[] = entries.map(([key,value]) => key === 'customFields' ? JSON.stringify(value) : value);
@@ -504,6 +555,19 @@ type PurchaseLine=ReturnType<typeof invoiceSchema.parse>['items'] extends (infer
 async function insertPurchaseLine(client:PoolClient,invoiceId:string,line:PurchaseLine,position:number,unit:string,precision=0){
  return (await client.query<{id:string}>('INSERT INTO invoice_items(invoice_id,name,quantity,unit_price,inventory_item_id,category_id,position,unit,serial_numbers,manufacturer,model,location_id,quantity_precision) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id',[invoiceId,line.name,line.quantity,line.unitPrice,line.kind==='inventory'?line.inventoryItemId:null,line.kind==='asset'?line.categoryId:null,position,unit,JSON.stringify(line.serialNumbers??[]),line.manufacturer??null,line.model??null,line.locationId??null,precision])).rows[0].id;
 }
+// Every purchase path (invoice entry, line completion, legacy delivery) creates
+// equipment through this one function, so permission rules cannot diverge.
+// Purchased equipment starts in PREPARATION; required category fields are
+// enforced when it is issued (see requireIssueReady), not at receipt.
+async function createPurchasedAsset(client:PoolClient,user:User,data:{name:string;categoryId:string;manufacturer?:string|null;model?:string|null;locationId?:string|null;serialNumber?:string|null;purchasedAt:string;unitPrice:string|null;invoiceId:string;invoiceNumber:string},invoiceItemId:string):Promise<Asset>{
+ requirePermission(user,'asset.create');
+ const created=(await client.query<{asset_id:string}>('INSERT INTO assets(name,category_id,manufacturer,model,location_id,serial_number,purchased_at,purchase_price,invoice_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING asset_id',[data.name,data.categoryId,data.manufacturer??null,data.model??null,data.locationId??null,data.serialNumber??null,data.purchasedAt,data.unitPrice,data.invoiceId])).rows[0];
+ const asset=await assetById(created.asset_id,client);
+ await client.query('INSERT INTO invoice_item_assets(invoice_item_id,asset_id) VALUES($1,$2)',[invoiceItemId,asset.id]);
+ await client.query('INSERT INTO qr_codes(asset_id,target_path,created_by) VALUES($1,$2,$3)',[asset.id,`/asset/${asset.assetId}`,user.id]);
+ await assetEvent(client,user,'RECEIVE_ASSET',asset,`Przyjęto ${asset.name} (${asset.assetId}). Faktura ${data.invoiceNumber}.`);
+ return asset;
+}
 async function attachPurchaseAssets(client:PoolClient,user:User,invoice:{id:string;number:string;date:string;currency:string},lineId:string,line:PurchaseLine,createMissing:boolean,fillQuantity=false){
  const preview=await resolveSerials(client,line.serialNumbers??[],invoice.id,lineId,true);
  let createdCount=0;
@@ -523,8 +587,7 @@ async function attachPurchaseAssets(client:PoolClient,user:User,invoice:{id:stri
   }else if(createMissing){
    requirePermission(user,'asset.create');
    if(line.matches?.some(m=>m.serialNumber.toLowerCase()===match?.serialNumber.toLowerCase()))throw new AppError(409,'Dopasowanie zmieniło się. Sprawdź numery ponownie.');
-   const created=(await client.query<{asset_id:string}>('INSERT INTO assets(name,category_id,manufacturer,model,location_id,serial_number,purchased_at,purchase_price,invoice_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING asset_id',[line.name,line.categoryId,line.manufacturer??null,line.model??null,line.locationId??null,match?.serialNumber??null,invoice.date,line.unitPrice,invoice.id])).rows[0];
-   const asset=await assetById(created.asset_id,client);await client.query('INSERT INTO invoice_item_assets(invoice_item_id,asset_id) VALUES($1,$2)',[lineId,asset.id]);await client.query('INSERT INTO qr_codes(asset_id,target_path,created_by) VALUES($1,$2,$3)',[asset.id,`/asset/${asset.assetId}`,user.id]);await assetEvent(client,user,'RECEIVE_ASSET',asset,`Przyjęto ${asset.name} (${asset.assetId}). Faktura ${invoice.number}.`);createdCount++;
+   await createPurchasedAsset(client,user,{name:line.name!,categoryId:line.categoryId!,manufacturer:line.manufacturer,model:line.model,locationId:line.locationId,serialNumber:match?.serialNumber??null,purchasedAt:invoice.date,unitPrice:line.unitPrice??null,invoiceId:invoice.id,invoiceNumber:invoice.number},lineId);createdCount++;
   }
  }
  return createdCount;
@@ -535,7 +598,7 @@ async function recordAssetReceipt(client:PoolClient,user:User,invoiceId:string,l
  await audit(client,user,'RECEIVE_DELIVERY','delivery',deliveryId,`Przyjęto ${count} nowych urządzeń z faktury.`,null,{invoiceId,lineId,count});
 }
 export async function createInvoice(body:unknown,user:User):Promise<Invoice>{
- requireRole(user,advancedRoles);const input=parse(invoiceSchema,body),total=input.items?purchaseTotal(input.items):null;
+ requireRole(user,advancedRoles);requirePermission(user,'invoice.edit');const input=parse(invoiceSchema,body),total=input.items?purchaseTotal(input.items):null;
  if(input.items&&input.amount!==null&&total!==null&&moneyCents(input.amount)!==moneyCents(total))throw new AppError(400,'Kwota faktury musi odpowiadać sumie pozycji.');
  if(input.receive&&!input.items?.some(l=>l.kind!=='other'))throw new AppError(400,'Dodaj urządzenie lub produkt, aby przyjąć zakup.');
  if((input.items?.filter(l=>l.kind==='asset').reduce((s,l)=>s+l.quantity,0)??0)>1000)throw new AppError(400,'Najwyżej 1000 urządzeń na fakturze.');
@@ -557,7 +620,7 @@ export async function createInvoice(body:unknown,user:User):Promise<Invoice>{
  };return input.requestId?idempotent(client,user,input.requestId,'CREATE_INVOICE',input,apply):apply();});
 }
 export async function completeInvoiceLine(invoiceId:string,lineId:string,body:unknown,user:User){
- requireRole(user,advancedRoles);requirePermission(user,'asset.view');parse(uuidSchema,invoiceId);parse(uuidSchema,lineId);
+ requireRole(user,advancedRoles);requirePermission(user,'invoice.edit');requirePermission(user,'asset.view');parse(uuidSchema,invoiceId);parse(uuidSchema,lineId);
  const input=parse(serialPreviewSchema.omit({invoiceId:true,lineId:true}).extend({matches:z.array(z.object({serialNumber:z.string().trim().min(1).max(160),assetId:assetIdSchema,version:z.number().int().positive()}).strict()).max(1000).default([]),createMissing:z.boolean().default(false),version:z.number().int().positive(),requestId:uuidSchema}).strict(),body);
  return mutate(client=>idempotent(client,user,input.requestId,'INVOICE_SERIALS:'+lineId,input,async()=>{
   const invoice=(await client.query<Invoice>(`SELECT ${invoiceProjection} ${invoiceFrom} WHERE i.id=$1 FOR UPDATE OF i`,[invoiceId])).rows[0];if(!invoice)throw new AppError(404,'Nie znaleziono faktury.');if(invoice.version!==input.version)throw new AppError(409,'Faktura zmieniła się. Odśwież dane.');
@@ -570,7 +633,7 @@ export async function completeInvoiceLine(invoiceId:string,lineId:string,body:un
 }
 
 export async function receiveInvoiceStock(invoiceId:string,lineId:string,body:unknown,user:User){
- requireRole(user,advancedRoles);requirePermission(user,'inventory.move');parse(uuidSchema,invoiceId);parse(uuidSchema,lineId);
+ requireRole(user,advancedRoles);requirePermission(user,'invoice.edit');requirePermission(user,'inventory.move');parse(uuidSchema,invoiceId);parse(uuidSchema,lineId);
  const input=parse(z.object({quantity:quantitySchema(),version:z.number().int().positive(),requestId:uuidSchema}).strict(),body);
  return mutate(client=>idempotent(client,user,input.requestId,'INVOICE_STOCK:'+lineId,input,async()=>{
   const invoice=(await client.query<{version:number;number:string}>('SELECT version,number FROM invoices WHERE id=$1 FOR UPDATE',[invoiceId])).rows[0];if(!invoice)throw new AppError(404,'Nie znaleziono faktury.');if(invoice.version!==input.version)throw new AppError(409,'Faktura zmieniła się. Odśwież dane.');
@@ -588,7 +651,7 @@ export async function receiveInvoiceStock(invoiceId:string,lineId:string,body:un
 }
 
 export async function updateInvoice(id:string,body:unknown,user:User):Promise<Invoice>{
- requireRole(user,advancedRoles);parse(uuidSchema,id);const input=parse(invoicePatchSchema,body);
+ requireRole(user,advancedRoles);requirePermission(user,'invoice.edit');parse(uuidSchema,id);const input=parse(invoicePatchSchema,body);
  if(input.items&&input.amount!==null&&purchaseTotal(input.items)!==null&&moneyCents(input.amount)!==moneyCents(purchaseTotal(input.items)!))throw new AppError(400,'Kwota faktury musi odpowiadać sumie pozycji.');
  return mutate(async client=>{
   const before=(await client.query<Invoice>(`SELECT ${invoiceProjection} ${invoiceFrom} WHERE i.id=$1 FOR UPDATE OF i`,[id])).rows[0];
@@ -600,8 +663,8 @@ export async function updateInvoice(id:string,body:unknown,user:User):Promise<In
    priceChanges={before:rows,after:input.itemPrices};
    for(const price of input.itemPrices)await client.query('UPDATE invoice_items SET unit_price=$2 WHERE id=$1',[price.id,price.unitPrice]);
    const prices=new Map(input.itemPrices.map(p=>[p.id,p.unitPrice]));
-   totalAfter=purchaseTotal(rows.map(r=>({quantity:r.quantity,unitPrice:prices.has(r.id)?prices.get(r.id)!:r.unitPrice})));
-   if(input.amount!==null&&totalAfter!==null&&moneyCents(input.amount)!==moneyCents(totalAfter))throw new AppError(400,'Kwota faktury musi odpowiadać sumie pozycji.');
+   const pricedTotal=purchaseTotal(rows.map(r=>({quantity:r.quantity,unitPrice:prices.has(r.id)?prices.get(r.id)!:r.unitPrice})));
+   if(input.amount!==null&&pricedTotal!==null&&moneyCents(input.amount)!==moneyCents(pricedTotal))throw new AppError(400,'Kwota faktury musi odpowiadać sumie pozycji.');
   }
   if(input.items){
    const serials=input.items.flatMap(l=>l.serialNumbers??[]);if(serials.length)requirePermission(user,'asset.view');await resolveSerials(client,serials,id,undefined,true);
@@ -617,6 +680,9 @@ export async function updateInvoice(id:string,body:unknown,user:User):Promise<In
    }
   }
   if(input.currency!==before.currency&&(await client.query('SELECT id FROM assets WHERE invoice_id=$1 LIMIT 1',[id])).rowCount)throw new AppError(409,'Nie można zmienić waluty faktury z powiązanym sprzętem. Wymaga to sprawdzenia wartości zakupu.');
+  // As in createInvoice: a missing amount means the sum of the (current) lines.
+  // A line without a price keeps the total unknown (null), never zero.
+  if(input.amount===null){const lines=(await client.query<{quantity:number;unitPrice:string|null}>('SELECT quantity::float8 AS quantity,unit_price::text AS "unitPrice" FROM invoice_items WHERE invoice_id=$1',[id])).rows;totalAfter=lines.length?purchaseTotal(lines):null;}
   await client.query('UPDATE invoices SET number=$2,supplier_id=$3,date=$4,amount=$5,currency=$6,order_number=$7,notes=$8,version=version+1 WHERE id=$1',[id,input.number,input.supplierId,input.date,input.amount??totalAfter,input.currency,input.orderNumber??null,input.notes??null]);
   const after=(await client.query<Invoice>(`SELECT ${invoiceProjection} ${invoiceFrom} WHERE i.id=$1`,[id])).rows[0];
   await audit(client,user,'UPDATE_INVOICE','invoice',id,`Zmieniono fakturę ${after.number}.`,priceChanges?{...before,itemPrices:priceChanges.before}:before,priceChanges?{...after,itemPrices:priceChanges.after}:after);return clean(after);
@@ -624,7 +690,7 @@ export async function updateInvoice(id:string,body:unknown,user:User):Promise<In
 }
 export async function listInvoices(params: URLSearchParams): Promise<PageResult<Invoice>> {
   const term = searchTerm(params);
-  return paginated<Invoice>(invoiceProjection,invoiceFrom,term ? ['(i.number ILIKE $1 OR s.name ILIKE $1)'] : [],term ? [term] : [],'i.date DESC,i.created_at DESC,i.id',params);
+  return paginated<Invoice>(invoiceProjection,invoiceFrom,term ? ['(i.number ILIKE $1 OR s.name ILIKE $1)'] : [],term ? [term] : [],'i.date DESC,i.created_at DESC,i.id',params,{key:'i.id'});
 }
 export async function getInvoice(id: string): Promise<InvoiceDetail> {
   parse(uuidSchema,id);
@@ -642,11 +708,16 @@ export async function getInvoice(id: string): Promise<InvoiceDetail> {
 }
 export async function listDeliveries(params: URLSearchParams): Promise<PageResult<Delivery>> {
   const term = searchTerm(params);
-  return paginated<Delivery>(deliveryProjection,deliveryFrom,term ? ['(i.number ILIKE $1 OR s.name ILIKE $1)'] : [],term ? [term] : [],'d.received_at DESC,d.id',params);
+  return paginated<Delivery>(deliveryProjection,deliveryFrom,term ? ['(i.number ILIKE $1 OR s.name ILIKE $1)'] : [],term ? [term] : [],'d.received_at DESC,d.id',params,{key:'d.id'});
 }
 export async function receiveDelivery(body: unknown, user: User): Promise<Delivery> {
   requireRole(user,advancedRoles);
+  requirePermission(user,'invoice.edit');
   const input = parse(deliverySchema,body);
+  // Legacy receipt: every product line moves stock and every device line creates
+  // equipment, so check both before any write (the transaction also rolls back).
+  if(input.items.some(line=>line.kind==='inventory'))requirePermission(user,'inventory.move');
+  if(input.items.some(line=>line.kind==='asset'))requirePermission(user,'asset.create');
   return mutate(client => idempotent(client,user,input.requestId,'delivery:receive',input,async () => {
     const invoice = await client.query<{id:string}>(`INSERT INTO invoices(number,supplier_id,date,currency,order_number,received_by)
       VALUES($1,$2,$3,$4,$5,$6) RETURNING id`,[input.invoiceNumber,input.supplierId,input.date,input.currency,input.orderNumber ?? null,user.id]);
@@ -669,13 +740,7 @@ export async function receiveDelivery(body: unknown, user: User): Promise<Delive
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,[invoiceId,line.name,line.quantity,line.unitPrice,line.categoryId,position+1,JSON.stringify(line.serialNumbers??[]),line.manufacturer??null,line.model??null,line.locationId??null]);
         await client.query('INSERT INTO delivery_items(delivery_id,invoice_item_id,quantity) VALUES($1,$2,$3)',[deliveryId,invoiceLine.rows[0].id,line.quantity]);
         for (let index=0; index<line.quantity; index++) {
-          const created = await client.query<{asset_id:string}>(`INSERT INTO assets(name,category_id,manufacturer,model,location_id,serial_number,purchased_at,purchase_price,invoice_id)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING asset_id`,
-            [line.name,line.categoryId,line.manufacturer ?? null,line.model ?? null,line.locationId ?? null,line.serialNumbers?.[index] ?? null,input.date,line.unitPrice,invoiceId]);
-          const asset = await assetById(created.rows[0].asset_id,client);
-          await client.query('INSERT INTO invoice_item_assets(invoice_item_id,asset_id) VALUES($1,$2)',[invoiceLine.rows[0].id,asset.id]);
-          await client.query('INSERT INTO qr_codes(asset_id,target_path,created_by) VALUES($1,$2,$3)',[asset.id,`/asset/${asset.assetId}`,user.id]);
-          await assetEvent(client,user,'RECEIVE_ASSET',asset,`Przyjęto ${asset.name} (${asset.assetId}). Faktura ${input.invoiceNumber}.`);
+          await createPurchasedAsset(client,user,{name:line.name,categoryId:line.categoryId,manufacturer:line.manufacturer,model:line.model,locationId:line.locationId,serialNumber:line.serialNumbers?.[index] ?? null,purchasedAt:input.date,unitPrice:line.unitPrice,invoiceId,invoiceNumber:input.invoiceNumber},invoiceLine.rows[0].id);
         }
       }
     }

@@ -10,7 +10,7 @@ export interface Named { id: string; name: string }
 export interface CategoryField { key:string; label:string; type:'text'|'number'|'date'|'boolean'|'select'; required:boolean; options?:string[] }
 export interface Category extends Named {description:string|null;fieldDefinitions:CategoryField[];standardFields:import('./asset-fields').StandardFields;version:number}
 export interface Supplier extends Named {taxId:string|null;regon:string|null;street:string|null;postalCode:string|null;city:string|null;country:string|null;contactName:string|null;email:string|null;phone:string|null;website:string|null;bankAccount:string|null;notes:string|null;version:number}
-export interface Employee extends Named {employeeNumber:string|null;email:string|null;phone:string|null;department:string|null;position:string|null;locationId:string|null;locationName:string|null;userId:string|null;userActive?:boolean|null;active:boolean;notes:string|null;version:number;assetCount:number}
+export interface Employee extends Named {employeeNumber:string|null;email:string|null;phone:string|null;department:string|null;position:string|null;locationId:string|null;locationName:string|null;userId:string|null;userActive?:boolean|null;active:boolean;notes:string|null;version:number;assetCount?:number}
 export interface Location extends Named { path: string; kind: string; parentId: string | null; version:number; assetCount?:number; childCount?:number }
 export interface Asset {
   id: string; assetId: string; name: string; categoryId: string; categoryName: string;
@@ -31,8 +31,13 @@ export interface InvoiceLine { id: string; name: string; quantity: number; unitP
 export interface InvoiceDetail extends Invoice { items: InvoiceLine[]; assets: Asset[]; deliveries: Delivery[]; supplier?:Supplier }
 export interface InvoiceDocument { id: string; name: string; size: number; sha256: string; uploadedBy: string; createdAt: string }
 export interface Delivery { id: string; invoiceId: string; invoiceNumber: string; supplierName: string; receivedAt: string; receivedBy: string; itemCount: number; quantities?:{unit:string;quantity:number}[]; notes: string | null }
-export interface Lookups { categories: Category[]; locations: Location[]; suppliers: Supplier[]; users: User[]; employees:Employee[]; invoices: Pick<Invoice, 'id'|'number'>[]; serviceNowUrl: string | null }
-export interface PageResult<T> { items: T[]; total: number; page: number; pageSize: number }
+/** Lookups expose full supplier data only with invoice.view; otherwise id and name for filters. */
+export type SupplierOption = Pick<Supplier,'id'|'name'> & Partial<Supplier>;
+export interface Lookups { categories: Category[]; locations: Location[]; suppliers: SupplierOption[]; users: User[]; serviceNowUrl: string | null }
+/** Parts of /api/lookups that can be requested alone (?only=locations,suppliers). */
+export const lookupParts = ['categories','locations','suppliers','users','settings'] as const;
+export type LookupPart = typeof lookupParts[number];
+export interface PageResult<T> { items: T[]; total: number; page: number; pageSize: number; /** Continuation for the next page in the default order (send as `after`). */ nextCursor?: string | null }
 export interface Dashboard { totalAssets: number; activeAssets: number; statusCounts: Record<AssetStatus,number>; inventoryCount: number; lowStockCount: number; lowStock: InventoryItem[]; monthDeliveries: number; monthReceivedAssets: number; recentDeliveries: Delivery[]; recentAssets: Asset[]; activity: History[] }
 export interface SearchResult { type: 'asset'|'inventory'|'invoice'|'location'|'employee'|'incident'|'config'|'document'|'user'; id: string; title: string; subtitle: string; href: string; score?:number }
 export interface ReportGroup { id?: string | null; label: string; count: number }

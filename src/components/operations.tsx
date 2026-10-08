@@ -218,7 +218,7 @@ function InvoiceListScreen() {
       />
       <ErrorMessage message={error} onRetry={reload} />
       <SuccessMessage message={success}/>
-      {creating&&<InvoiceComposer onClose={()=>setCreating(false)} onSaved={invoice=>{setCreating(false);reload();refreshLookups();router.push(`/invoice/${invoice.id}`);}}/>}
+      {creating&&<InvoiceComposer onClose={()=>setCreating(false)} onSaved={invoice=>{setCreating(false);reload();refreshLookups(['suppliers','locations']);router.push(`/invoice/${invoice.id}`);}}/>}
       <div className="toolbar"><div className="toolbar-search"><input aria-label="Szukaj faktur" placeholder="Numer FV lub kontrahent…" value={query} onChange={e=>setQuery(e.target.value)}/></div></div>
       <section className="panel">
         <div className="panel-heading">
@@ -332,7 +332,7 @@ function InvoiceDetailScreen({ id }: { id: string }) {
             </div>
             {hasPermission(user,'invoice.edit')&&<Button variant="secondary" onClick={()=>setEditing(true)}>Edytuj fakturę</Button>}
           </div>
-          {editing&&<InvoiceComposer invoice={invoice} onClose={()=>setEditing(false)} onSaved={()=>{setEditing(false);reload();refreshLookups();}}/>}
+          {editing&&<InvoiceComposer invoice={invoice} onClose={()=>setEditing(false)} onSaved={()=>{setEditing(false);reload();refreshLookups(['suppliers','locations']);}}/>}
           <section className="panel">
             <div className="invoice-summary">
               <div>
@@ -408,7 +408,7 @@ function InvoiceDetailScreen({ id }: { id: string }) {
             </div>
           </section>
           {serialLine&&<InvoiceSerialModal invoice={invoice} line={serialLine} onClose={()=>setSerialLine(null)} onSaved={()=>{setSerialLine(null);reload();}}/>}
-          {stockLine&&<InvoiceStockModal invoice={invoice} line={stockLine} onClose={()=>setStockLine(null)} onSaved={()=>{setStockLine(null);reload();refreshLookups();}}/>}
+          {stockLine&&<InvoiceStockModal invoice={invoice} line={stockLine} onClose={()=>setStockLine(null)} onSaved={()=>{setStockLine(null);reload();refreshLookups(['locations']);}}/>}
           {invoice.notes&&<section className="panel"><div className="panel-heading"><h2>Uwagi do faktury</h2></div><p className="panel-body">{invoice.notes}</p></section>}
           {invoice.supplier&&<section className="panel"><div className="panel-heading"><h2>Dane kontrahenta</h2></div><DetailsGrid entries={[["Firma",invoice.supplier.name],["NIP / VAT ID",invoice.supplier.taxId],["REGON",invoice.supplier.regon],["Adres",[invoice.supplier.street,invoice.supplier.postalCode,invoice.supplier.city,invoice.supplier.country].filter(Boolean).join(', ')],["Osoba kontaktowa",invoice.supplier.contactName],["E-mail",invoice.supplier.email],["Telefon",invoice.supplier.phone],["Konto / IBAN",invoice.supplier.bankAccount]]}/></section>}
           <section className="panel">
